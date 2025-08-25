@@ -9,8 +9,9 @@ import operator
 
 try:
     from itertools import izip
-except:
+except ImportError:  # python 3.x
     izip = zip
+    xrange = range
 
 
 class QfpDB:
@@ -82,7 +83,7 @@ class QfpDB:
             if not self._record_exists(c, title):
                 recordid = self._store_record(c, title)
                 self._store_peaks(c, fp, recordid)
-                for qHash, qQuad in izip(fp.hashes, fp.strongest):
+                for qHash, qQuad in zip(fp.hashes, fp.strongest):
                     self._store_hash(c, qHash)
                     self._store_quad(c, qQuad, recordid)
         conn.commit()
@@ -118,7 +119,7 @@ class QfpDB:
         """
         for x, y in fp.peaks:
             c.execute("""INSERT INTO Peaks
-                         VALUES (?,?,?)""", (recordid, x, y))
+                         VALUES (?,?,?)""", (recordid, x.item(), y.item()))
 
     def _store_hash(self, c, h):
         """
@@ -126,15 +127,17 @@ class QfpDB:
         """
         c.execute("""INSERT INTO Hashes
                      VALUES (null,?,?,?,?,?,?,?,?)""",
-                  (h[0], h[0], h[1], h[1], h[2], h[2], h[3], h[3]))
+                     (h[0].item(), h[0].item(), h[1].item(), h[1].item(),
+                     h[2].item(), h[2].item(), h[3].item(), h[3].item()))
 
     def _store_quad(self, c, q, recordid):
         """
         Inserts given quad into the Quads table
         """
         hashid = c.lastrowid
-        values = (hashid, recordid, q.A.x, q.A.y, q.C.x, q.C.y,
-                  q.D.x, q.D.y, q.B.x, q.B.y)
+        values = (hashid, recordid, q.A.x.item(), q.A.y.item(),
+                  q.C.x.item(), q.C.y.item(), q.D.x.item(), q.D.y.item(),
+                  q.B.x.item(), q.B.y.item())
         c.execute("""INSERT INTO Quads
                      VALUES (?,?,?,?,?,?,?,?,?,?)""", values)
 
@@ -166,7 +169,7 @@ class QfpDB:
         conn = sqlite3.connect(self.path)
         c = conn.cursor()
         filtered = defaultdict(list)
-        for qHash, qQuad in izip(fp.hashes, fp.strongest):
+        for qHash, qQuad in zip(fp.hashes, fp.strongest):
             self._radius_nn(c, qHash)
             with np.errstate(divide='ignore', invalid='ignore'):
                 self._filter_candidates(conn, c, qQuad, filtered)
