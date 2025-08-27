@@ -1,11 +1,10 @@
 from __future__ import division, print_function
 from bisect import bisect_left, bisect_right
 from collections import defaultdict, namedtuple
-from qfp.fingerprint import fpType
-import numpy as np
+from qfp.fingerprint import fpType, ReferenceFingerprint
 import sqlite3
-import math
-import operator
+import numpy as np
+import os
 
 try:
     from itertools import izip
@@ -88,6 +87,51 @@ class QfpDB:
                     self._store_quad(c, qQuad, recordid)
         conn.commit()
         conn.close()
+
+    def store_from_pickle(self, pickle_path, title=None):
+        """
+        Loads a fingerprint from a pickle file and stores it in the database
+        
+        Args:
+            pickle_path (str): Path to the pickle file
+            title (str, optional): Title for the record. If None, uses audio filename
+        """
+        # Load fingerprint from pickle
+        fp = ReferenceFingerprint.load_from_pickle(pickle_path)
+        
+        # Use audio filename as title if not provided
+        if title is None:
+            title = os.path.splitext(os.path.basename(fp.path))[0]
+        
+        # Store in database
+        self.store(fp, title)
+        print(f"Fingerprint from {pickle_path} stored in database with title: {title}")
+
+    def store_all_pickles_from_directory(self, pickle_dir="fingerprints"):
+        """
+        Loads and stores all pickle files from a directory
+        
+        Args:
+            pickle_dir (str): Directory containing pickle files
+        """
+        if not os.path.exists(pickle_dir):
+            print(f"Directory {pickle_dir} does not exist")
+            return
+        
+        pickle_files = [f for f in os.listdir(pickle_dir) if f.endswith('.pkl')]
+        
+        if not pickle_files:
+            print(f"No pickle files found in {pickle_dir}")
+            return
+        
+        print(f"Found {len(pickle_files)} pickle files to process...")
+        
+        for pickle_file in pickle_files:
+            pickle_path = os.path.join(pickle_dir, pickle_file)
+            try:
+                self.store_from_pickle(pickle_path)
+            except Exception as e:
+                print(f"Error processing {pickle_file}: {e}")
 
     def _record_exists(self, c, title):
         """
