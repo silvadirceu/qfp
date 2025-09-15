@@ -2,7 +2,9 @@ import pickle
 import os
 from .audio import load_audio
 from .utils import stft, find_peaks, generate_hash, n_strongest
-from .quads import find_quads
+from .quads import find_quads_stream_v2
+import matplotlib.pyplot as plt
+import numpy as np
 
 
 class fpType:
@@ -57,13 +59,74 @@ class Fingerprint:
         spectrogram = stft(samples)
         # print("fez o spectograma")
         self.peaks = list(find_peaks(spectrogram, w, h))
+        # self.save_spectrogram_with_peaks(spectrogram, self.peaks)
         # print("encontrou picos")
-        quads = find_quads(self.peaks, r, c)
-        # print("encontrou quads")
-        self.strongest = n_strongest(spectrogram, quads, q)
+        # quads = find_quads(self.peaks, r, c)
+        # # print("encontrou quads")
+        # self.strongest = n_strongest(spectrogram, quads, q)
+        self.strongest = find_quads_stream_v2(self.peaks, r, c, spectrogram, q)
         # print("selecionou os mais fortes")
         self.hashes = [generate_hash(q) for q in self.strongest]
         # print("gerou hashes")
+    
+    def save_spectrogram_with_peaks(self, spectrogram, peaks, out_dir="plots"):
+        """
+        Salva o espectrograma em escala logarítmica com os picos encontrados.
+        
+        Args:
+            spectrogram (ndarray): matriz do espectrograma
+            peaks (list): lista de picos detectados
+            out_dir (str): diretório para salvar os plots
+        """
+        # cria diretório se não existir
+        if not os.path.exists(out_dir):
+            os.makedirs(out_dir)
+
+        audio_filename = os.path.splitext(os.path.basename(self.path))[0]
+
+        # --- Versão limpa ---
+        plt.figure(figsize=(12, 6))
+        plt.imshow(
+            np.transpose(spectrogram),
+            origin="lower",
+            aspect="auto",
+            cmap="magma"
+        )
+        plt.colorbar(label="Amplitude (dB)")
+        plt.xlabel("Tempo (frames STFT)")
+        plt.ylabel("Frequência (bins)")
+        plt.title("Spectrograma")
+        plt.tight_layout()
+
+        out_path_clean = os.path.join(out_dir, f"{audio_filename}_spectrogram.png")
+        plt.savefig(out_path_clean, dpi=150)
+        plt.close()
+        print(f"Spectrograma (sem picos) salvo em: {out_path_clean}")
+
+        # --- Versão com picos ---
+        plt.figure(figsize=(12, 6))
+        plt.imshow(
+            np.transpose(spectrogram),
+            origin="lower",
+            aspect="auto",
+            cmap="magma"
+        )
+        x_vals = [p.x for p in peaks]
+        y_vals = [p.y for p in peaks]
+        plt.scatter(x_vals, y_vals, c="cyan", s=10, marker="x", label="Peaks")
+        plt.colorbar(label="Amplitude (dB)")
+        plt.xlabel("Tempo (frames STFT)")
+        plt.ylabel("Frequência (bins)")
+        plt.title("Spectrograma com picos detectados")
+        plt.legend()
+        plt.tight_layout()
+
+        out_path_peaks = os.path.join(out_dir, f"{audio_filename}_spectrogram_peaks.png")
+        plt.savefig(out_path_peaks, dpi=150)
+        plt.close()
+        print(f"Spectrograma (com picos) salvo em: {out_path_peaks}")
+
+
 
 
 class ReferenceFingerprint(Fingerprint):

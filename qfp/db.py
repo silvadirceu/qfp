@@ -5,6 +5,8 @@ from qfp.fingerprint import fpType, ReferenceFingerprint
 import sqlite3
 import numpy as np
 import os
+import math
+import operator
 
 try:
     from itertools import izip
@@ -226,7 +228,7 @@ class QfpDB:
         conn.close()
         return mc
 
-    def _radius_nn(self, c, h, e=0.01):
+    def _radius_nn(self, c, h, e=0.125):
         """
         Epsilon (e) neighbor search for a given hash. Matching hash ids
         can be retrieved from the cursor.
@@ -356,8 +358,8 @@ class QfpDB:
         for rPeak in rPeaks:
             rPeak = (rPeak.x - mc.offset, rPeak.y)
             rPeakScaled = self.Peak(rPeak[0] / mc.sFreq, rPeak[1] / mc.sTime)
-            lBound = bisect_left(qPeaks, (rPeakScaled.x - eX, None))
-            rBound = bisect_right(qPeaks, (rPeakScaled.x + eX, None))
+            lBound = bisect_left(qPeaks, (rPeakScaled.x - eX, 0))
+            rBound = bisect_right(qPeaks, (rPeakScaled.x + eX, 0))
             for i in xrange(lBound, rBound):
                 if not rPeakScaled.y - eY <= qPeaks[i].y <= rPeakScaled.y + eY:
                     continue
