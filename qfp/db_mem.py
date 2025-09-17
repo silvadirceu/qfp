@@ -5,6 +5,10 @@ import os
 import math
 import operator
 import faiss  # pip install faiss-cpu (ou faiss-gpu)
+import time
+from numba import njit, prange
+from numba.typed import List as NumbaList
+from qfp.fingerprint import fpType, ReferenceFingerprint
 
 try:
     from itertools import izip
@@ -12,6 +16,88 @@ except ImportError:
     izip = zip
     xrange = range
 
+
+# --------------------------
+# Núcleo numba (sem usar listas Python)
+# --------------------------
+@njit(parallel=True, cache=True, debug=True)
+def _filter_candidates_core(qQuads_arr, lims, I,
+                            quad_Ax, quad_Ay, quad_Bx, quad_By,
+                            quad_Cx, quad_Cy, quad_Dx, quad_Dy, quad_recordid, e):
+    # Usar numba.typed.List para append dentro do njit
+    recordids = NumbaList()
+    offsets = NumbaList()
+    sTimes = NumbaList()
+    sFreqs = NumbaList()
+
+    n_queries = qQuads_arr.shape[0]
+
+    for qi in range(n_queries):
+        # qQuads_arr assumed float64: Ax,Ay,Bx,By,Cx,Cy,Dx,Dy
+        qAx = qQuads_arr[qi, 0]
+        qAy = qQuads_arr[qi, 1]
+        qBx = qQuads_arr[qi, 2]
+        qBy = qQuads_arr[qi, 3]
+        # qCx = qQuads_arr[qi, 4]  # not used in checks, kept for completeness
+        # qCy = qQuads_arr[qi, 5]
+        # qDx = qQuads_arr[qi, 6]
+        # qDy = qQuads_arr[qi, 7]
+
+        start = lims[qi]
+        end = lims[qi + 1]
+
+        # iterate indices in I[start:end]
+        for k in range(start, end):
+            idx = I[k]
+
+            # recupera cQuad dos arrays; todos inteiros (int32 ou int64 ok)
+            cAx = quad_Ax[idx]
+            cAy = quad_Ay[idx]
+            cBx = quad_Bx[idx]
+            cBy = quad_By[idx]
+            # cCx = quad_Cx[idx]
+            # cCy = quad_Cy[idx]
+            # cDx = quad_Dx[idx]
+            # cDy = quad_Dy[idx]
+            recordid = quad_recordid[idx]
+
+            # rough pitch coherence (proteção contra divisões por zero)
+            if cAy == 0:
+                continue
+            ratio = qAy / cAy
+            if not (1.0 / (1.0 + e) <= ratio <= 1.0 / (1.0 - e)):
+                continue
+
+            # sTime
+            denom = (cBx - cAx)
+            if denom == 0:
+                continue
+            sTime = (qBx - qAx) / denom
+            if not (1.0 / (1.0 + e) <= sTime <= 1.0 / (1.0 - e)):
+                continue
+
+            # sFreq
+            denom2 = (cBy - cAy)
+            if denom2 == 0:
+                continue
+            sFreq = (qBy - qAy) / denom2
+            if not (1.0 / (1.0 + e) <= sFreq <= 1.0 / (1.0 - e)):
+                continue
+
+            # fine pitch coherence
+            # Obs: qAy e cAy são floats/integer; operação segura
+            if abs(qAy - (cAy * sFreq)) > 1.8:
+                continue
+
+            # offset
+            offset = cAx - (qAx / sTime)
+
+            # append em typed lists
+            recordids.append(recordid)
+            offsets.append(offset)
+            sTimes.append(sTime)
+            sFreqs.append(sFreq)
+    return recordids, offsets, sTimes, sFreqs
 
 class InMemoryQfpDB:
     """
@@ -29,11 +115,42 @@ class InMemoryQfpDB:
         self._next_recordid = 1
 
         # peakfile: 1D arrays for X (time) and Y (freq) (dtype=int32)
-        self.peaks_x = np.empty((0,), dtype=np.int32)
-        self.peaks_y = np.empty((0,), dtype=np.int32)
+        # self.peaks_x = np.empty((0,), dtype=np.int32)
+        # self.peaks_y = np.empty((0,), dtype=np.int32)
+        self._peaks_x_list = []
+        self._peaks_y_list = []
+
         self.peak_offsets = {}  # recordid -> (start, end)
 
         # refrecords / quads: store quad coordinates as int32 columns
+        self._quad_Ax_list = []
+        self._quad_Ay_list = []
+        self._quad_Cx_list = []
+        self._quad_Cy_list = []
+        self._quad_Dx_list = []
+        self._quad_Dy_list = []
+        self._quad_Bx_list = []
+        self._quad_By_list = []
+        self._quad_recordid_list = []
+
+        # self.quad_Ax = np.empty((0,), dtype=np.int32)
+        # self.quad_Ay = np.empty((0,), dtype=np.int32)
+        # self.quad_Cx = np.empty((0,), dtype=np.int32)
+        # self.quad_Cy = np.empty((0,), dtype=np.int32)
+        # self.quad_Dx = np.empty((0,), dtype=np.int32)
+        # self.quad_Dy = np.empty((0,), dtype=np.int32)
+        # self.quad_Bx = np.empty((0,), dtype=np.int32)
+        # self.quad_By = np.empty((0,), dtype=np.int32)
+        # self.quad_recordid = np.empty((0,), dtype=np.int32)
+
+        # hashes array (float32 Nx4) in same order as quads
+        self._hashes_list = []
+        # self.hashes = np.empty((0, 4), dtype=np.float32)
+
+
+        # arrays finais (vazios inicialmente)
+        self.peaks_x = np.empty((0,), dtype=np.int32)
+        self.peaks_y = np.empty((0,), dtype=np.int32)
         self.quad_Ax = np.empty((0,), dtype=np.int32)
         self.quad_Ay = np.empty((0,), dtype=np.int32)
         self.quad_Cx = np.empty((0,), dtype=np.int32)
@@ -43,9 +160,8 @@ class InMemoryQfpDB:
         self.quad_Bx = np.empty((0,), dtype=np.int32)
         self.quad_By = np.empty((0,), dtype=np.int32)
         self.quad_recordid = np.empty((0,), dtype=np.int32)
-
-        # hashes array (float32 Nx4) in same order as quads
         self.hashes = np.empty((0, 4), dtype=np.float32)
+
 
         # FAISS index (will be created lazily). We keep index_flat for simplicity.
         self.faiss_index = None
@@ -62,20 +178,67 @@ class InMemoryQfpDB:
     # Utilities: internal
     # --------------------
 
+    # def _ensure_faiss_index(self, use_gpu=False):
+    #     """
+    #     Builds a FAISS IndexFlatL2 over self.hashes if not exists.
+    #     For large DBs prefer IVF,PQ or HNSW depending on memory/speed tradeoffs.
+    #     """
+    #     if self.faiss_index is not None:
+    #         return
+    #     d = 4
+    #     # index that stores vectors and supports range_search
+    #     index = faiss.IndexFlatL2(d)
+    #     # convert to float32 contiguous
+    #     if self.hashes.shape[0] > 0:
+    #         index.add(self.hashes)
+    #     self.faiss_index = index
+
     def _ensure_faiss_index(self, use_gpu=False):
         """
         Builds a FAISS IndexFlatL2 over self.hashes if not exists.
-        For large DBs prefer IVF,PQ or HNSW depending on memory/speed tradeoffs.
+        Conversion from list to array happens lazily here.
         """
         if self.faiss_index is not None:
             return
+        # converter listas para arrays caso existam
+        if self._hashes_list:
+            self.hashes = np.array(self._hashes_list, dtype=np.float32).reshape(-1, 4)
+            self._hashes_list = []
+
+        if self._quad_Ax_list:
+            self.quad_Ax = np.array(self._quad_Ax_list, dtype=np.int32)
+            self.quad_Ay = np.array(self._quad_Ay_list, dtype=np.int32)
+            self.quad_Cx = np.array(self._quad_Cx_list, dtype=np.int32)
+            self.quad_Cy = np.array(self._quad_Cy_list, dtype=np.int32)
+            self.quad_Dx = np.array(self._quad_Dx_list, dtype=np.int32)
+            self.quad_Dy = np.array(self._quad_Dy_list, dtype=np.int32)
+            self.quad_Bx = np.array(self._quad_Bx_list, dtype=np.int32)
+            self.quad_By = np.array(self._quad_By_list, dtype=np.int32)
+            self.quad_recordid = np.array(self._quad_recordid_list, dtype=np.int32)
+            # liberar listas
+            self._quad_Ax_list = []
+            self._quad_Ay_list = []
+            self._quad_Cx_list = []
+            self._quad_Cy_list = []
+            self._quad_Dx_list = []
+            self._quad_Dy_list = []
+            self._quad_Bx_list = []
+            self._quad_By_list = []
+            self._quad_recordid_list = []
+
+        if self._peaks_x_list:
+            self.peaks_x = np.array(self._peaks_x_list, dtype=np.int32)
+            self.peaks_y = np.array(self._peaks_y_list, dtype=np.int32)
+            self._peaks_x_list = []
+            self._peaks_y_list = []
+
+        # criar FAISS
         d = 4
-        # index that stores vectors and supports range_search
         index = faiss.IndexFlatL2(d)
-        # convert to float32 contiguous
         if self.hashes.shape[0] > 0:
             index.add(self.hashes)
         self.faiss_index = index
+
 
     # --------------------
     # STORING FUNCTIONS
@@ -83,7 +246,7 @@ class InMemoryQfpDB:
 
     def store(self, fp, title):
         """
-        Store a ReferenceFingerprint (in memory).
+        Store a ReferenceFingerprint (in memory) using lists to acumulate data.
         """
         if fp.fp_type != fpType.Reference:
             raise TypeError("May only store reference fingerprints in db")
@@ -95,45 +258,32 @@ class InMemoryQfpDB:
         recordid = self._next_recordid
         self._next_recordid += 1
 
-        # 1) store peaks: fp.peaks is list of namedtuples Peak(x,y)
-        peaks_arr_x = np.array([int(p.x) for p in fp.peaks], dtype=np.int32)
-        peaks_arr_y = np.array([int(p.y) for p in fp.peaks], dtype=np.int32)
-        start = len(self.peaks_x)
-        self.peaks_x = np.concatenate([self.peaks_x, peaks_arr_x]) if peaks_arr_x.size > 0 else self.peaks_x
-        self.peaks_y = np.concatenate([self.peaks_y, peaks_arr_y]) if peaks_arr_y.size > 0 else self.peaks_y
-        end = len(self.peaks_x)
+        # 1) store peaks
+        start = len(self._peaks_x_list)
+        for p in fp.peaks:
+            self._peaks_x_list.append(int(p.x))
+            self._peaks_y_list.append(int(p.y))
+        end = len(self._peaks_x_list)
         self.peak_offsets[recordid] = (start, end)
 
-        # 2) store quads (strongest) and hashes
-        # Each quad is namedtuple with A,C,D,B where each .x,.y may be numpy scalars -> cast to int
+        # 2) store quads
         n_quads = len(fp.strongest)
-        if n_quads > 0:
-            Ax = np.array([int(q.A.x) for q in fp.strongest], dtype=np.int32)
-            Ay = np.array([int(q.A.y) for q in fp.strongest], dtype=np.int32)
-            Cx = np.array([int(q.C.x) for q in fp.strongest], dtype=np.int32)
-            Cy = np.array([int(q.C.y) for q in fp.strongest], dtype=np.int32)
-            Dx = np.array([int(q.D.x) for q in fp.strongest], dtype=np.int32)
-            Dy = np.array([int(q.D.y) for q in fp.strongest], dtype=np.int32)
-            Bx = np.array([int(q.B.x) for q in fp.strongest], dtype=np.int32)
-            By = np.array([int(q.B.y) for q in fp.strongest], dtype=np.int32)
-            recids = np.full((n_quads,), recordid, dtype=np.int32)
+        for q in fp.strongest:
+            self._quad_Ax_list.append(int(q.A.x))
+            self._quad_Ay_list.append(int(q.A.y))
+            self._quad_Cx_list.append(int(q.C.x))
+            self._quad_Cy_list.append(int(q.C.y))
+            self._quad_Dx_list.append(int(q.D.x))
+            self._quad_Dy_list.append(int(q.D.y))
+            self._quad_Bx_list.append(int(q.B.x))
+            self._quad_By_list.append(int(q.B.y))
+            self._quad_recordid_list.append(recordid)
 
-            self.quad_Ax = np.concatenate([self.quad_Ax, Ax]) if Ax.size > 0 else self.quad_Ax
-            self.quad_Ay = np.concatenate([self.quad_Ay, Ay]) if Ay.size > 0 else self.quad_Ay
-            self.quad_Cx = np.concatenate([self.quad_Cx, Cx]) if Cx.size > 0 else self.quad_Cx
-            self.quad_Cy = np.concatenate([self.quad_Cy, Cy]) if Cy.size > 0 else self.quad_Cy
-            self.quad_Dx = np.concatenate([self.quad_Dx, Dx]) if Dx.size > 0 else self.quad_Dx
-            self.quad_Dy = np.concatenate([self.quad_Dy, Dy]) if Dy.size > 0 else self.quad_Dy
-            self.quad_Bx = np.concatenate([self.quad_Bx, Bx]) if Bx.size > 0 else self.quad_Bx
-            self.quad_By = np.concatenate([self.quad_By, By]) if By.size > 0 else self.quad_By
-            self.quad_recordid = np.concatenate([self.quad_recordid, recids]) if recids.size > 0 else self.quad_recordid
+        # 3) store hashes
+        for h in fp.hashes:
+            self._hashes_list.append(list(h))  # garante 4 elementos
 
-        # 3) store hashes (fp.hashes assumed iterable of 4-tuples or np.array)
-        if len(fp.hashes) > 0:
-            h = np.array(fp.hashes, dtype=np.float32).reshape(-1, 4)
-            self.hashes = np.vstack([self.hashes, h]) if self.hashes.size else h
-
-        # 4) update fidindex metadata
+        # 4) update fidindex
         self.fidindex[title] = {
             'recordid': recordid,
             'title': title,
@@ -141,16 +291,86 @@ class InMemoryQfpDB:
             'peak_start': start,
             'peak_end': end,
             'num_quads': n_quads,
-            'quad_start': len(self.hashes) - n_quads if n_quads > 0 else 0,
-            'quad_end': len(self.hashes)
+            'quad_start': len(self._hashes_list) - n_quads if n_quads > 0 else 0,
+            'quad_end': len(self._hashes_list)
         }
 
-        # 5) invalidate/rebuild faiss (lazy)
-        # simplest approach: discard index; build on next query
-        if self.faiss_index is not None:
-            self.faiss_index = None
+        # 5) invalidate FAISS
+        self.faiss_index = None
 
         print(f"Stored record '{title}' with recordid {recordid}, peaks {len(fp.peaks)}, quads {n_quads}")
+
+
+    # def store(self, fp, title):
+    #     """
+    #     Store a ReferenceFingerprint (in memory).
+    #     """
+    #     if fp.fp_type != fpType.Reference:
+    #         raise TypeError("May only store reference fingerprints in db")
+
+    #     if title in self.fidindex:
+    #         print(f"record already exists: {title}")
+    #         return
+
+    #     recordid = self._next_recordid
+    #     self._next_recordid += 1
+
+    #     # 1) store peaks: fp.peaks is list of namedtuples Peak(x,y)
+    #     peaks_arr_x = np.array([int(p.x) for p in fp.peaks], dtype=np.int32)
+    #     peaks_arr_y = np.array([int(p.y) for p in fp.peaks], dtype=np.int32)
+    #     start = len(self.peaks_x)
+    #     self.peaks_x = np.concatenate([self.peaks_x, peaks_arr_x]) if peaks_arr_x.size > 0 else self.peaks_x
+    #     self.peaks_y = np.concatenate([self.peaks_y, peaks_arr_y]) if peaks_arr_y.size > 0 else self.peaks_y
+    #     end = len(self.peaks_x)
+    #     self.peak_offsets[recordid] = (start, end)
+
+    #     # 2) store quads (strongest) and hashes
+    #     # Each quad is namedtuple with A,C,D,B where each .x,.y may be numpy scalars -> cast to int
+    #     n_quads = len(fp.strongest)
+    #     if n_quads > 0:
+    #         Ax = np.array([int(q.A.x) for q in fp.strongest], dtype=np.int32)
+    #         Ay = np.array([int(q.A.y) for q in fp.strongest], dtype=np.int32)
+    #         Cx = np.array([int(q.C.x) for q in fp.strongest], dtype=np.int32)
+    #         Cy = np.array([int(q.C.y) for q in fp.strongest], dtype=np.int32)
+    #         Dx = np.array([int(q.D.x) for q in fp.strongest], dtype=np.int32)
+    #         Dy = np.array([int(q.D.y) for q in fp.strongest], dtype=np.int32)
+    #         Bx = np.array([int(q.B.x) for q in fp.strongest], dtype=np.int32)
+    #         By = np.array([int(q.B.y) for q in fp.strongest], dtype=np.int32)
+    #         recids = np.full((n_quads,), recordid, dtype=np.int32)
+
+    #         self.quad_Ax = np.concatenate([self.quad_Ax, Ax]) if Ax.size > 0 else self.quad_Ax
+    #         self.quad_Ay = np.concatenate([self.quad_Ay, Ay]) if Ay.size > 0 else self.quad_Ay
+    #         self.quad_Cx = np.concatenate([self.quad_Cx, Cx]) if Cx.size > 0 else self.quad_Cx
+    #         self.quad_Cy = np.concatenate([self.quad_Cy, Cy]) if Cy.size > 0 else self.quad_Cy
+    #         self.quad_Dx = np.concatenate([self.quad_Dx, Dx]) if Dx.size > 0 else self.quad_Dx
+    #         self.quad_Dy = np.concatenate([self.quad_Dy, Dy]) if Dy.size > 0 else self.quad_Dy
+    #         self.quad_Bx = np.concatenate([self.quad_Bx, Bx]) if Bx.size > 0 else self.quad_Bx
+    #         self.quad_By = np.concatenate([self.quad_By, By]) if By.size > 0 else self.quad_By
+    #         self.quad_recordid = np.concatenate([self.quad_recordid, recids]) if recids.size > 0 else self.quad_recordid
+
+    #     # 3) store hashes (fp.hashes assumed iterable of 4-tuples or np.array)
+    #     if len(fp.hashes) > 0:
+    #         h = np.array(fp.hashes, dtype=np.float32).reshape(-1, 4)
+    #         self.hashes = np.vstack([self.hashes, h]) if self.hashes.size else h
+
+    #     # 4) update fidindex metadata
+    #     self.fidindex[title] = {
+    #         'recordid': recordid,
+    #         'title': title,
+    #         'num_peaks': len(fp.peaks),
+    #         'peak_start': start,
+    #         'peak_end': end,
+    #         'num_quads': n_quads,
+    #         'quad_start': len(self.hashes) - n_quads if n_quads > 0 else 0,
+    #         'quad_end': len(self.hashes)
+    #     }
+
+    #     # 5) invalidate/rebuild faiss (lazy)
+    #     # simplest approach: discard index; build on next query
+    #     if self.faiss_index is not None:
+    #         self.faiss_index = None
+
+    #     print(f"Stored record '{title}' with recordid {recordid}, peaks {len(fp.peaks)}, quads {n_quads}")
 
     def store_from_pickle(self, pickle_path, title=None):
         fp = ReferenceFingerprint.load_from_pickle(pickle_path)
@@ -177,94 +397,204 @@ class InMemoryQfpDB:
     # QUERY / SEARCH FLOW
     # --------------------
 
-    def query(self, fp, vThreshold=0.5, e=0.125, radius_l2=None):
+    def _faiss_batch_search(self, qHashes, radius):
         """
-        Query the in-memory DB with a QueryFingerprint.
+        Executa uma busca em batch no FAISS para todos os qHashes.
 
         Args:
-            fp: QueryFingerprint (fp.fp_type must be fpType.Query)
-            vThreshold: validation threshold for vScore
-            e: per-dimension tolerance used in original implementation
-            radius_l2: override radius (Euclidean). If None, computed from e as L_inf->L2: 2*e
+            qHashes: np.array (N, 4) com os hashes da query.
+            radius: raio L2 (não quadrado).
+
+        Returns:
+            lims, D, I -> saída bruta do faiss.range_search
         """
+        self._ensure_faiss_index()
+        qmat = np.ascontiguousarray(qHashes, dtype=np.float32)
+        lims, D, I = self.faiss_index.range_search(qmat, radius * radius)
+        return lims, D, I
+
+
+    # ==========================
+    # Função wrapper híbrida
+    # ==========================
+    def filter_candidates_hybrid(self, qHashes, qQuads, lims, I, e):
+        """
+        wrapper: converte qQuads para ndarray, valida dtypes e chama o núcleo numba.
+        Retorna filtered dict {recordid: [(offset, (sTime, sFreq)), ...]}
+        """
+
+        # 1) converter qQuads (lista de Quad(namedtuple)) -> numpy float64 (n,8)
+        n = len(qQuads)
+        qQuads_arr = np.zeros((n, 8), dtype=np.float64)
+        for i, quad in enumerate(qQuads):
+            qQuads_arr[i, 0] = float(quad.A.x)
+            qQuads_arr[i, 1] = float(quad.A.y)
+            qQuads_arr[i, 2] = float(quad.B.x)
+            qQuads_arr[i, 3] = float(quad.B.y)
+            qQuads_arr[i, 4] = float(quad.C.x)
+            qQuads_arr[i, 5] = float(quad.C.y)
+            qQuads_arr[i, 6] = float(quad.D.x)
+            qQuads_arr[i, 7] = float(quad.D.y)
+
+        # 2) garantir que lims e I são numpy arrays de inteiros (contíguos)
+        lims_arr = np.ascontiguousarray(lims)   # geralmente int64
+        I_arr = np.ascontiguousarray(I)         # geralmente int64
+
+        # 3) garantir arrays da classe são contíguos e do dtype adequado
+        # quad_* podem ser int32; numba aceita int32/int64 para indexação.
+        quad_Ax = np.ascontiguousarray(self.quad_Ax)
+        quad_Ay = np.ascontiguousarray(self.quad_Ay)
+        quad_Bx = np.ascontiguousarray(self.quad_Bx)
+        quad_By = np.ascontiguousarray(self.quad_By)
+        quad_Cx = np.ascontiguousarray(self.quad_Cx)
+        quad_Cy = np.ascontiguousarray(self.quad_Cy)
+        quad_Dx = np.ascontiguousarray(self.quad_Dx)
+        quad_Dy = np.ascontiguousarray(self.quad_Dy)
+        quad_recordid = np.ascontiguousarray(self.quad_recordid)
+
+        # 4) chama núcleo numba
+        print("antes do core")
+        rec_list, off_list, st_list, sf_list = _filter_candidates_core(
+            qQuads_arr, lims_arr, I_arr,
+            quad_Ax, quad_Ay, quad_Bx, quad_By,
+            quad_Cx, quad_Cy, quad_Dx, quad_Dy, quad_recordid, float(e)
+        )
+        print("depois do core")
+
+        # 5) converte numba.typed.List para numpy arrays em Python
+        # rec_list é um numba.typed.List — iterável como lista normal
+        recordids = np.array(list(rec_list), dtype=np.int64)
+        offsets = np.array(list(off_list), dtype=np.float64)
+        sTimes = np.array(list(st_list), dtype=np.float64)
+        sFreqs = np.array(list(sf_list), dtype=np.float64)
+
+        # 6) agrupa no formato original (defaultdict(list))
+        filtered = defaultdict(list)
+        for rid, off, st, sf in zip(recordids, offsets, sTimes, sFreqs):
+            filtered[int(rid)].append((float(off), (float(st), float(sf))))
+
+        return filtered
+
+
+    def _filter_candidates(self, qHashes, qQuads, lims, I, e):
+        return self.filter_candidates_hybrid(qHashes, qQuads, lims, I, e)
+
+    # def _filter_candidates(self, qHashes, qQuads, lims, I, e):
+    #     """
+    #     Aplica os filtros de consistência (pitch, sTime, sFreq, etc.) nos resultados da busca FAISS.
+
+    #     Args:
+    #         qHashes: lista de hashes da query
+    #         qQuads: lista de quads correspondentes à query
+    #         lims, I: saída de faiss.range_search
+    #         e: tolerância
+
+    #     Returns:
+    #         filtered: dict {recordid -> [(offset, (sTime, sFreq)), ...]}
+    #     """
+    #     print("qHashes: ", qHashes)
+    #     print("qHashes type: ", type(qHashes))
+    #     print("qQuads: ", qQuads)
+    #     print("qQuads type: ", type(qQuads))
+    #     print("lims: ", lims)
+    #     print("lims type: ", type(lims))
+    #     print("I: ", I)
+    #     print("I type: ", type(I))
+    #     print("e: ", e)
+    #     print("e type: ", type(e))
+    #     filtered = defaultdict(list)
+    #     n_queries = len(qHashes)
+
+    #     for qi in range(n_queries):
+    #         qQuad = qQuads[qi]
+    #         start, end = lims[qi], lims[qi+1]
+    #         idxs = I[start:end]
+
+    #         for idx in idxs:
+    #             cQuad, recordid = self._lookup_quad_by_index(int(idx))
+    #             try:
+    #                 # rough pitch coherence
+    #                 if not 1 / (1 + e) <= (float(qQuad.A.y) / float(cQuad.A.y)) <= 1 / (1 - e):
+    #                     continue
+    #                 # sTime
+    #                 denom = (cQuad.B.x - cQuad.A.x)
+    #                 if denom == 0:
+    #                     continue
+    #                 sTime = (qQuad.B.x - qQuad.A.x) / denom
+    #                 if not 1 / (1 + e) <= sTime <= 1 / (1 - e):
+    #                     continue
+    #                 # sFreq
+    #                 denom2 = (cQuad.B.y - cQuad.A.y)
+    #                 if denom2 == 0:
+    #                     continue
+    #                 sFreq = (qQuad.B.y - qQuad.A.y) / denom2
+    #                 if not 1 / (1 + e) <= sFreq <= 1 / (1 - e):
+    #                     continue
+    #                 # fine pitch coherence
+    #                 if not abs(qQuad.A.y - (cQuad.A.y * sFreq)) <= 1.8:
+    #                     continue
+    #                 # offset
+    #                 offset = cQuad.A.x - (qQuad.A.x / sTime)
+    #                 filtered[recordid].append((offset, (sTime, sFreq)))
+    #             except Exception:
+    #                 continue
+
+    #     return filtered
+
+
+    def query(self, fp, vThreshold=0.5, e=0.125, radius_l2=None):
         if fp.fp_type != fpType.Query:
             raise TypeError("May only query db with query fingerprints")
 
-        # prepare query peaks sorted by x for verification stage
+        # preparar query peaks
         qPeaks = [(int(p.x), int(p.y)) for p in fp.peaks]
-        qPeaks.sort(key=lambda p: p[0])  # sort by time X
-        fp._qPeaks_sorted = qPeaks  # attach for use in verify
-
-        # ensure faiss index
-        self._ensure_faiss_index()
+        qPeaks.sort(key=lambda p: p[0])
+        fp._qPeaks_sorted = qPeaks
 
         if radius_l2 is None:
-            # map L_inf epsilon to L2 radius (4 dims): L2_radius = sqrt(d) * e  (worst-case)
             radius = math.sqrt(4) * e
         else:
             radius = float(radius_l2)
 
-        # For each query hash -> range search
-        filtered = defaultdict(list)  # recordid -> list of (offset, (sTime,sFreq))
-        for qHash, qQuad in zip(fp.hashes, fp.strongest):
-            qvec = np.array(qHash, dtype=np.float32).reshape(1, -1)
-            # faiss range_search expects squared radius (L2)
-            lims, D, I = self.faiss_index.range_search(qvec, radius * radius)
-            # I contains indices of neighbors; D squared L2 distances; lims delimit results
-            if I.size == 0:
-                continue
-            # iterate matched indices
-            for idx in I:
-                # retrieve quad coords and recordid
-                cQuad, recordid = self._lookup_quad_by_index(int(idx))
-                # Now perform identical checks as original _filter_candidates
-                # safe-cast to float to avoid int division
-                try:
-                    # rough pitch coherence:
-                    if not 1 / (1 + e) <= (float(qQuad.A.y) / float(cQuad.A.y)) <= 1 / (1 - e):
-                        continue
-                    # sTime
-                    denom = (cQuad.B.x - cQuad.A.x)
-                    if denom == 0:
-                        continue
-                    sTime = (qQuad.B.x - qQuad.A.x) / denom
-                    if not 1 / (1 + e) <= sTime <= 1 / (1 - e):
-                        continue
-                    denom2 = (cQuad.B.y - cQuad.A.y)
-                    if denom2 == 0:
-                        continue
-                    sFreq = (qQuad.B.y - qQuad.A.y) / denom2
-                    if not 1 / (1 + e) <= sFreq <= 1 / (1 - e):
-                        continue
-                    # fine pitch coherence
-                    if not abs(qQuad.A.y - (cQuad.A.y * sFreq)) <= 1.8:
-                        continue
-                    offset = cQuad.A.x - (qQuad.A.x / sTime)
-                    filtered[recordid].append((offset, (sTime, sFreq)))
-                except Exception:
-                    # numeric issues -> skip candidate
-                    continue
-        # print(filtered)
-        # bin times and produce match candidates
+        # 1. FAISS batch search
+        faiss_search_start = time.time()
+        lims, D, I = self._faiss_batch_search(fp.hashes, radius)
+        faiss_search_end = time.time()
+
+        # 2. Aplicar filtros nos resultados
+        filter_start = time.time()
+        print("antes de filtrar")
+        filtered = self._filter_candidates(fp.hashes, fp.strongest, lims, I, e)
+        print("depois de filtrar")
+        filter_end = time.time()
+
+        # 3. Bin times + scales
+        bin_start = time.time()
         binned = {k: self._bin_times(v) for k, v in filtered.items()}
-        # print("binned: ", binned)
+        bin_end = time.time()
+        results_start = time.time()
         results = {k: self._scales(v) for k, v in binned.items() if len(v) >= 4}
-        # print("results: ", results)
+        results_end = time.time()
+        matches_start = time.time()
         mc = [self.MatchCandidate(k, a[0], a[1], a[2][0], a[2][1])
               for k, v in results.items() for a in v]
-        # print("mc: ", mc)
 
-        # validate each candidate
+        # 4. Validação
         matches = []
         for m in mc:
             vScore = self._validate_match(m, fp)
             if vScore >= vThreshold:
-                
                 title = self._lookup_record_title(m.recordid)
                 matches.append(self.Match(title, m.offset, vScore))
-        
+        matches_end = time.time()
         fp.match_candidates = mc
         fp.matches = matches
+
+        print(f"FAISS search time: {faiss_search_end - faiss_search_start:.3f}s")
+        print(f"Filtering time: {filter_end - filter_start:.3f}s")
+        print(f"Bin times time: {bin_end - bin_start:.3f}s")
+        print(f"Results time: {results_end - results_start:.3f}s")
+        print(f"Total matches time: {matches_end - matches_start:.3f}s")
         return fp.matches
 
     # --------------------
