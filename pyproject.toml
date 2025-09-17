@@ -3,12 +3,12 @@ name = "qfp"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.9"
 dependencies = [
-    "bitstring>=4.3.1",
     "faiss-cpu>=1.12.0",
-    "matplotlib>=3.10.6",
-    "numpy>=2.3.2",
+    "matplotlib>=3.9.4",
+    "numba>=0.60.0",
+    "numpy==2.0",
     "pydub>=0.25.1",
-    "scipy>=1.16.1",
+    "scipy>=1.13.1",
 ]
