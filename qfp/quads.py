@@ -4,7 +4,7 @@ from __future__ import division
 from bisect import bisect_left, bisect_right
 from collections import namedtuple
 from itertools import combinations
-
+from heapq import heappush, heapreplace
 
 # def find_quads(peaks, r, c):
 #     """
@@ -84,8 +84,6 @@ def find_quads_stream_v2(peaks, r, c, spec, q_per_partition, partition_len=250):
     """
     Implementação completa e eficiente.
     """
-    from bisect import bisect_left, bisect_right
-    from heapq import heappush, heappushpop
 
     heaps = {}
     counter = 0
@@ -107,8 +105,7 @@ def find_quads_stream_v2(peaks, r, c, spec, q_per_partition, partition_len=250):
         ys = [p.y for p in filtered]
         # find leftmost index where x > root.x (Ax < Cx)
         # if no such index, continue
-        import bisect
-        left_idx = bisect.bisect_right(xs, root.x - 1)  # first with x > root.x
+        left_idx = bisect_right(xs, root.x - 1)  # first with x > root.x
         if left_idx >= len(filtered):
             continue
 
@@ -139,12 +136,12 @@ def find_quads_stream_v2(peaks, r, c, spec, q_per_partition, partition_len=250):
             # c_indices and d_indices are in ascending x order, so we can produce pairs efficiently:
             # for each c_idx, we can find in d_indices the first position >= c_idx
             # use bisect on d_indices (which contains indices in original filtered space)
-            import bisect as _bis
+        
             # create an array for binary-searchable d_indices
             # iterate over c_indices
             for c_idx in c_indices:
                 # find first d_pos in d_indices where value >= c_idx
-                pos = _bis.bisect_left(d_indices, c_idx)
+                pos = bisect_left(d_indices, c_idx)
                 if pos >= len(d_indices):
                     continue
                 for d_pos in range(pos, len(d_indices)):
@@ -173,13 +170,12 @@ def find_quads_stream_v2(peaks, r, c, spec, q_per_partition, partition_len=250):
                         # maintain min-heap of up to q_per_partition strongest; smallest strength at root
                         # we want to keep largest strengths; use heappushpop to maintain size
                         if len(heap) < q_per_partition:
-                            import heapq
-                            heapq.heappush(heap, entry)
+                            heappush(heap, entry)
                         else:
                             import heapq
                             # if entry stronger than smallest, replace
                             if entry[0] > heap[0][0]:
-                                heapq.heapreplace(heap, entry)
+                                heapreplace(heap, entry)
 
     # flatten heaps in order of partition index -> return list of quads (strongest per partition)
     result = []
