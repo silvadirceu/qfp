@@ -20,7 +20,7 @@ except ImportError:
 # --------------------------
 # Núcleo numba (sem usar listas Python)
 # --------------------------
-@njit(parallel=True, cache=True, debug=True)
+@njit(cache=True, debug=True)
 def _filter_candidates_core(qQuads_arr, lims, I,
                             quad_Ax, quad_Ay, quad_Bx, quad_By,
                             quad_Cx, quad_Cy, quad_Dx, quad_Dy, quad_recordid, e):
@@ -178,25 +178,21 @@ class InMemoryQfpDB:
     # Utilities: internal
     # --------------------
 
-    # def _ensure_faiss_index(self, use_gpu=False):
-    #     """
-    #     Builds a FAISS IndexFlatL2 over self.hashes if not exists.
-    #     For large DBs prefer IVF,PQ or HNSW depending on memory/speed tradeoffs.
-    #     """
-    #     if self.faiss_index is not None:
-    #         return
-    #     d = 4
-    #     # index that stores vectors and supports range_search
-    #     index = faiss.IndexFlatL2(d)
-    #     # convert to float32 contiguous
-    #     if self.hashes.shape[0] > 0:
-    #         index.add(self.hashes)
-    #     self.faiss_index = index
+    def _create_faiss_index(self, d=4):
+        """
+        Builds a FAISS IndexFlatL2 if not exists.
+        For large DBs prefer IVF,PQ or HNSW depending on memory/speed tradeoffs.
+        """
+        if self.faiss_index is not None:
+            return
+        self.faiss_index = faiss.IndexFlatL2(d)
 
     def _ensure_faiss_index(self, use_gpu=False):
         """
         Builds a FAISS IndexFlatL2 over self.hashes if not exists.
         Conversion from list to array happens lazily here.
+        The values from each fingerprint are appended to lists when the store() method is called,
+        here we convert this lists to numpy arrays and build the index.
         """
         if self.faiss_index is not None:
             return
@@ -232,12 +228,15 @@ class InMemoryQfpDB:
             self._peaks_x_list = []
             self._peaks_y_list = []
 
-        # criar FAISS
-        d = 4
-        index = faiss.IndexFlatL2(d)
+        # creates faiss index and add hashes vector to index
+        self._create_faiss_index()
         if self.hashes.shape[0] > 0:
-            index.add(self.hashes)
-        self.faiss_index = index
+            print("Vectors dimension: ", self.hashes.shape)
+            
+            start_add = time.time()
+            self.faiss_index.add(self.hashes)
+            end_add = time.time()
+            print("Adding hashes to index: ", end_add - start_add)
 
 
     # --------------------
@@ -247,6 +246,7 @@ class InMemoryQfpDB:
     def store(self, fp, title):
         """
         Store a ReferenceFingerprint (in memory) using lists to acumulate data.
+        This is done to avoid large reallocations off numpy arrays on each store() call. 
         """
         if fp.fp_type != fpType.Reference:
             raise TypeError("May only store reference fingerprints in db")
@@ -408,8 +408,16 @@ class InMemoryQfpDB:
         Returns:
             lims, D, I -> saída bruta do faiss.range_search
         """
+        print("qHashes type: ", type(qHashes))
+        print("qHashes len: ", len(qHashes), " type: ", type(qHashes[0]))
+        start_ensure = time.time()
         self._ensure_faiss_index()
+        end_ensure = time.time()
+        print("Faiss index ensure time: ", end_ensure - start_ensure)
+        start_numpy = time.time()
         qmat = np.ascontiguousarray(qHashes, dtype=np.float32)
+        end_numpy = time.time()
+        print("qHashes conversion to numpy time: ", end_numpy - start_numpy)
         lims, D, I = self.faiss_index.range_search(qmat, radius * radius)
         return lims, D, I
 
@@ -453,13 +461,11 @@ class InMemoryQfpDB:
         quad_recordid = np.ascontiguousarray(self.quad_recordid)
 
         # 4) chama núcleo numba
-        print("antes do core")
         rec_list, off_list, st_list, sf_list = _filter_candidates_core(
             qQuads_arr, lims_arr, I_arr,
             quad_Ax, quad_Ay, quad_Bx, quad_By,
             quad_Cx, quad_Cy, quad_Dx, quad_Dy, quad_recordid, float(e)
         )
-        print("depois do core")
 
         # 5) converte numba.typed.List para numpy arrays em Python
         # rec_list é um numba.typed.List — iterável como lista normal
@@ -563,9 +569,7 @@ class InMemoryQfpDB:
 
         # 2. Aplicar filtros nos resultados
         filter_start = time.time()
-        print("antes de filtrar")
         filtered = self._filter_candidates(fp.hashes, fp.strongest, lims, I, e)
-        print("depois de filtrar")
         filter_end = time.time()
 
         # 3. Bin times + scales
@@ -598,7 +602,7 @@ class InMemoryQfpDB:
         return fp.matches
 
     # --------------------
-    # Helper methods mirroring original behaviour
+    # Helper methods for QFP thecnique
     # --------------------
 
     def _lookup_quad_by_index(self, idx):
