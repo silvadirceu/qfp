@@ -23,7 +23,7 @@ except ImportError:
 @njit(cache=True, debug=True)
 def _filter_candidates_core(qQuads_arr, lims, I,
                             quad_Ax, quad_Ay, quad_Bx, quad_By,
-                            quad_Cx, quad_Cy, quad_Dx, quad_Dy, quad_recordid, e):
+                            quad_Cx, quad_Cy, quad_Dx, quad_Dy, quad_recordid, e_tolerance):
     # Usar numba.typed.List para append dentro do njit
     recordids = NumbaList()
     offsets = NumbaList()
@@ -65,7 +65,7 @@ def _filter_candidates_core(qQuads_arr, lims, I,
             if cAy == 0:
                 continue
             ratio = qAy / cAy
-            if not (1.0 / (1.0 + e) <= ratio <= 1.0 / (1.0 - e)):
+            if not (1.0 / (1.0 + e_tolerance) <= ratio <= 1.0 / (1.0 - e_tolerance)):
                 continue
 
             # sTime
@@ -73,7 +73,7 @@ def _filter_candidates_core(qQuads_arr, lims, I,
             if denom == 0:
                 continue
             sTime = (qBx - qAx) / denom
-            if not (1.0 / (1.0 + e) <= sTime <= 1.0 / (1.0 - e)):
+            if not (1.0 / (1.0 + e_tolerance) <= sTime <= 1.0 / (1.0 - e_tolerance)):
                 continue
 
             # sFreq
@@ -81,7 +81,7 @@ def _filter_candidates_core(qQuads_arr, lims, I,
             if denom2 == 0:
                 continue
             sFreq = (qBy - qAy) / denom2
-            if not (1.0 / (1.0 + e) <= sFreq <= 1.0 / (1.0 - e)):
+            if not (1.0 / (1.0 + e_tolerance) <= sFreq <= 1.0 / (1.0 - e_tolerance)):
                 continue
 
             # fine pitch coherence
@@ -298,7 +298,7 @@ class InMemoryQfpDB:
         # 5) invalidate FAISS
         self.faiss_index = None
 
-        print(f"Stored record '{title}' with recordid {recordid}, peaks {len(fp.peaks)}, quads {n_quads}")
+        # print(f"Stored record '{title}' with recordid {recordid}, peaks {len(fp.peaks)}, quads {n_quads}")
 
 
     # def store(self, fp, title):
@@ -425,7 +425,7 @@ class InMemoryQfpDB:
     # ==========================
     # Função wrapper híbrida
     # ==========================
-    def filter_candidates_hybrid(self, qHashes, qQuads, lims, I, e):
+    def filter_candidates_hybrid(self, qHashes, qQuads, lims, I, e_tolerance):
         """
         wrapper: converte qQuads para ndarray, valida dtypes e chama o núcleo numba.
         Retorna filtered dict {recordid: [(offset, (sTime, sFreq)), ...]}
@@ -464,7 +464,7 @@ class InMemoryQfpDB:
         rec_list, off_list, st_list, sf_list = _filter_candidates_core(
             qQuads_arr, lims_arr, I_arr,
             quad_Ax, quad_Ay, quad_Bx, quad_By,
-            quad_Cx, quad_Cy, quad_Dx, quad_Dy, quad_recordid, float(e)
+            quad_Cx, quad_Cy, quad_Dx, quad_Dy, quad_recordid, float(e_tolerance)
         )
 
         # 5) converte numba.typed.List para numpy arrays em Python
@@ -482,8 +482,8 @@ class InMemoryQfpDB:
         return filtered
 
 
-    def _filter_candidates(self, qHashes, qQuads, lims, I, e):
-        return self.filter_candidates_hybrid(qHashes, qQuads, lims, I, e)
+    def _filter_candidates(self, qHashes, qQuads, lims, I, e_tolerance):
+        return self.filter_candidates_hybrid(qHashes, qQuads, lims, I, e_tolerance)
 
     # def _filter_candidates(self, qHashes, qQuads, lims, I, e):
     #     """
@@ -548,7 +548,7 @@ class InMemoryQfpDB:
     #     return filtered
 
 
-    def query(self, fp, vThreshold=0.5, e=0.125, radius_l2=None):
+    def query(self, fp, vThreshold=0.5, e_radius=0.1, radius_l2=None):
         if fp.fp_type != fpType.Query:
             raise TypeError("May only query db with query fingerprints")
 
@@ -558,7 +558,7 @@ class InMemoryQfpDB:
         fp._qPeaks_sorted = qPeaks
 
         if radius_l2 is None:
-            radius = math.sqrt(4) * e
+            radius = math.sqrt(4) * e_radius
         else:
             radius = float(radius_l2)
 
@@ -569,7 +569,7 @@ class InMemoryQfpDB:
 
         # 2. Aplicar filtros nos resultados
         filter_start = time.time()
-        filtered = self._filter_candidates(fp.hashes, fp.strongest, lims, I, e)
+        filtered = self._filter_candidates(fp.hashes, fp.strongest, lims, I, e_tolerance=0.2)
         filter_end = time.time()
 
         # 3. Bin times + scales
