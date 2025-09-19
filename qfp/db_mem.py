@@ -46,21 +46,23 @@ def _filter_candidates_core(qQuads_arr, lims, I,
         for k in range(start, end):
             idx = I[k]
 
-            # recupera cQuad dos arrays; todos inteiros (int32 ou int64 ok)
+            # recupera cQuad dos arrays; todos inteiros 
             cAx = quad_Ax[idx]
             cAy = quad_Ay[idx]
             cBx = quad_Bx[idx]
             cBy = quad_By[idx]
             recordid = quad_recordid[idx]
 
-            # rough pitch coherence (proteção contra divisões por zero)
+            # Rough pitch coherence:
+            #   1/(1+e) <= queAy/canAy <= 1/(1-e)
             if cAy == 0:
                 continue
             ratio = qAy / cAy
             if not (1.0 / (1.0 + e_tolerance) <= ratio <= 1.0 / (1.0 - e_tolerance)):
                 continue
 
-            # sTime
+            # X transformation tolerance check:
+            #   sTime = (queBx-queAx)/(canBx-canAx)
             denom = (cBx - cAx)
             if denom == 0:
                 continue
@@ -68,7 +70,8 @@ def _filter_candidates_core(qQuads_arr, lims, I,
             if not (1.0 / (1.0 + e_tolerance) <= sTime <= 1.0 / (1.0 - e_tolerance)):
                 continue
 
-            # sFreq
+            # Y transformation tolerance check:
+            #   sFreq = (queBy-queAy)/(canBy-canAy)
             denom2 = (cBy - cAy)
             if denom2 == 0:
                 continue
@@ -76,7 +79,8 @@ def _filter_candidates_core(qQuads_arr, lims, I,
             if not (1.0 / (1.0 + e_tolerance) <= sFreq <= 1.0 / (1.0 - e_tolerance)):
                 continue
 
-            # fine pitch coherence
+            # Fine pitch coherence:
+            #   |queAy-canAy*sFreq| <= eFine
             # Obs: qAy e cAy são floats/integer; operação segura
             if abs(qAy - (cAy * sFreq)) > 1.8:
                 continue
