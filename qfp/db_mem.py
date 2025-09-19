@@ -692,7 +692,6 @@ class InMemoryQfpDB:
         M = namedtuple('M', ['recordid', 'offset', 'sTime', 'sFreq'])
         mm = M(mc.recordid, mc.offset, mc.sTime, mc.sFreq)
         vScore = self._verify_peaks(mm, rPeaks, qPeaks)
-        title = self._lookup_record_title(mc.recordid)
         return vScore
 
     def _lookup_record_title(self, recordid):
