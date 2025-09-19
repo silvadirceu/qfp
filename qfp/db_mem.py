@@ -107,8 +107,6 @@ class InMemoryQfpDB:
         self._next_recordid = 1
 
         # peakfile: 1D arrays for X (time) and Y (freq) (dtype=int32)
-        # self.peaks_x = np.empty((0,), dtype=np.int32)
-        # self.peaks_y = np.empty((0,), dtype=np.int32)
         self._peaks_x_list = []
         self._peaks_y_list = []
 
@@ -125,20 +123,8 @@ class InMemoryQfpDB:
         self._quad_By_list = []
         self._quad_recordid_list = []
 
-        # self.quad_Ax = np.empty((0,), dtype=np.int32)
-        # self.quad_Ay = np.empty((0,), dtype=np.int32)
-        # self.quad_Cx = np.empty((0,), dtype=np.int32)
-        # self.quad_Cy = np.empty((0,), dtype=np.int32)
-        # self.quad_Dx = np.empty((0,), dtype=np.int32)
-        # self.quad_Dy = np.empty((0,), dtype=np.int32)
-        # self.quad_Bx = np.empty((0,), dtype=np.int32)
-        # self.quad_By = np.empty((0,), dtype=np.int32)
-        # self.quad_recordid = np.empty((0,), dtype=np.int32)
-
         # hashes array (float32 Nx4) in same order as quads
         self._hashes_list = []
-        # self.hashes = np.empty((0, 4), dtype=np.float32)
-
 
         # arrays finais (vazios inicialmente)
         self.peaks_x = np.empty((0,), dtype=np.int32)
@@ -159,7 +145,7 @@ class InMemoryQfpDB:
         self.faiss_index = None
         self.faiss_ids_offset = 0  # corresponds 1-to-1 with row indices in self.hashes
 
-        # namedtuples (compat)
+        # namedtuples
         self.Peak = namedtuple('Peak', ['x', 'y'])
         self.Quad = namedtuple('Quad', ['A', 'C', 'D', 'B'])
         mcNames = ['recordid', 'offset', 'num_matches', 'sTime', 'sFreq']
