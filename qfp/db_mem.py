@@ -388,68 +388,6 @@ class InMemoryQfpDB:
     def _filter_candidates(self, qHashes, qQuads, lims, I, e_tolerance):
         return self.filter_candidates_hybrid(qHashes, qQuads, lims, I, e_tolerance)
 
-    # def _filter_candidates(self, qHashes, qQuads, lims, I, e):
-    #     """
-    #     Aplica os filtros de consistência (pitch, sTime, sFreq, etc.) nos resultados da busca FAISS.
-
-    #     Args:
-    #         qHashes: lista de hashes da query
-    #         qQuads: lista de quads correspondentes à query
-    #         lims, I: saída de faiss.range_search
-    #         e: tolerância
-
-    #     Returns:
-    #         filtered: dict {recordid -> [(offset, (sTime, sFreq)), ...]}
-    #     """
-    #     print("qHashes: ", qHashes)
-    #     print("qHashes type: ", type(qHashes))
-    #     print("qQuads: ", qQuads)
-    #     print("qQuads type: ", type(qQuads))
-    #     print("lims: ", lims)
-    #     print("lims type: ", type(lims))
-    #     print("I: ", I)
-    #     print("I type: ", type(I))
-    #     print("e: ", e)
-    #     print("e type: ", type(e))
-    #     filtered = defaultdict(list)
-    #     n_queries = len(qHashes)
-
-    #     for qi in range(n_queries):
-    #         qQuad = qQuads[qi]
-    #         start, end = lims[qi], lims[qi+1]
-    #         idxs = I[start:end]
-
-    #         for idx in idxs:
-    #             cQuad, recordid = self._lookup_quad_by_index(int(idx))
-    #             try:
-    #                 # rough pitch coherence
-    #                 if not 1 / (1 + e) <= (float(qQuad.A.y) / float(cQuad.A.y)) <= 1 / (1 - e):
-    #                     continue
-    #                 # sTime
-    #                 denom = (cQuad.B.x - cQuad.A.x)
-    #                 if denom == 0:
-    #                     continue
-    #                 sTime = (qQuad.B.x - qQuad.A.x) / denom
-    #                 if not 1 / (1 + e) <= sTime <= 1 / (1 - e):
-    #                     continue
-    #                 # sFreq
-    #                 denom2 = (cQuad.B.y - cQuad.A.y)
-    #                 if denom2 == 0:
-    #                     continue
-    #                 sFreq = (qQuad.B.y - qQuad.A.y) / denom2
-    #                 if not 1 / (1 + e) <= sFreq <= 1 / (1 - e):
-    #                     continue
-    #                 # fine pitch coherence
-    #                 if not abs(qQuad.A.y - (cQuad.A.y * sFreq)) <= 1.8:
-    #                     continue
-    #                 # offset
-    #                 offset = cQuad.A.x - (qQuad.A.x / sTime)
-    #                 filtered[recordid].append((offset, (sTime, sFreq)))
-    #             except Exception:
-    #                 continue
-
-    #     return filtered
-
 
     def query(self, fp, vThreshold=0.5, e_radius=0.1, radius_l2=None):
         if fp.fp_type != fpType.Query:
