@@ -23,7 +23,7 @@ except ImportError:
 @njit(cache=True, debug=True)
 def _filter_candidates_core(qQuads_arr, lims, I,
                             quad_Ax, quad_Ay, quad_Bx, quad_By,
-                            quad_Cx, quad_Cy, quad_Dx, quad_Dy, quad_recordid, e_tolerance):
+                            quad_recordid, e_tolerance):
     # Usar numba.typed.List para append dentro do njit
     recordids = NumbaList()
     offsets = NumbaList()
@@ -38,10 +38,6 @@ def _filter_candidates_core(qQuads_arr, lims, I,
         qAy = qQuads_arr[qi, 1]
         qBx = qQuads_arr[qi, 2]
         qBy = qQuads_arr[qi, 3]
-        # qCx = qQuads_arr[qi, 4]  # not used in checks, kept for completeness
-        # qCy = qQuads_arr[qi, 5]
-        # qDx = qQuads_arr[qi, 6]
-        # qDy = qQuads_arr[qi, 7]
 
         start = lims[qi]
         end = lims[qi + 1]
@@ -55,10 +51,6 @@ def _filter_candidates_core(qQuads_arr, lims, I,
             cAy = quad_Ay[idx]
             cBx = quad_Bx[idx]
             cBy = quad_By[idx]
-            # cCx = quad_Cx[idx]
-            # cCy = quad_Cy[idx]
-            # cDx = quad_Dx[idx]
-            # cDy = quad_Dy[idx]
             recordid = quad_recordid[idx]
 
             # rough pitch coherence (proteção contra divisões por zero)
@@ -454,17 +446,13 @@ class InMemoryQfpDB:
         quad_Ay = np.ascontiguousarray(self.quad_Ay)
         quad_Bx = np.ascontiguousarray(self.quad_Bx)
         quad_By = np.ascontiguousarray(self.quad_By)
-        quad_Cx = np.ascontiguousarray(self.quad_Cx)
-        quad_Cy = np.ascontiguousarray(self.quad_Cy)
-        quad_Dx = np.ascontiguousarray(self.quad_Dx)
-        quad_Dy = np.ascontiguousarray(self.quad_Dy)
         quad_recordid = np.ascontiguousarray(self.quad_recordid)
 
         # 4) chama núcleo numba
         rec_list, off_list, st_list, sf_list = _filter_candidates_core(
             qQuads_arr, lims_arr, I_arr,
             quad_Ax, quad_Ay, quad_Bx, quad_By,
-            quad_Cx, quad_Cy, quad_Dx, quad_Dy, quad_recordid, float(e_tolerance)
+            quad_recordid, float(e_tolerance)
         )
 
         # 5) converte numba.typed.List para numpy arrays em Python
