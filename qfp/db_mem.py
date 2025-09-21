@@ -111,28 +111,12 @@ class InMemoryQfpDB:
         self._next_recordid = 1
 
         # peakfile: 1D arrays for X (time) and Y (freq) (dtype=int32)
-        self._peaks_x_list = []
-        self._peaks_y_list = []
+        self.peaks_x = np.empty((0,), dtype=np.int32)
+        self.peaks_y = np.empty((0,), dtype=np.int32)
 
         self.peak_offsets = {}  # recordid -> (start, end)
 
         # refrecords / quads: store quad coordinates as int32 columns
-        self._quad_Ax_list = []
-        self._quad_Ay_list = []
-        self._quad_Cx_list = []
-        self._quad_Cy_list = []
-        self._quad_Dx_list = []
-        self._quad_Dy_list = []
-        self._quad_Bx_list = []
-        self._quad_By_list = []
-        self._quad_recordid_list = []
-
-        # hashes array (float32 Nx4) in same order as quads
-        self._hashes_list = []
-
-        # arrays finais (vazios inicialmente)
-        self.peaks_x = np.empty((0,), dtype=np.int32)
-        self.peaks_y = np.empty((0,), dtype=np.int32)
         self.quad_Ax = np.empty((0,), dtype=np.int32)
         self.quad_Ay = np.empty((0,), dtype=np.int32)
         self.quad_Cx = np.empty((0,), dtype=np.int32)
@@ -142,12 +126,13 @@ class InMemoryQfpDB:
         self.quad_Bx = np.empty((0,), dtype=np.int32)
         self.quad_By = np.empty((0,), dtype=np.int32)
         self.quad_recordid = np.empty((0,), dtype=np.int32)
+
+        # hashes array (float32 Nx4) in same order as quads
         self.hashes = np.empty((0, 4), dtype=np.float32)
 
 
-        # FAISS index (will be created lazily). We keep index_flat for simplicity.
-        self.faiss_index = None
-        self.faiss_ids_offset = 0  # corresponds 1-to-1 with row indices in self.hashes
+        # FAISS index. We keep index_flat for simplicity.
+        self.faiss_index = faiss.IndexFlatL2(4)
 
         # namedtuples
         self.Peak = namedtuple('Peak', ['x', 'y'])
@@ -162,64 +147,10 @@ class InMemoryQfpDB:
 
     def _create_faiss_index(self, d=4):
         """
-        Builds a FAISS IndexFlatL2 if not exists.
+        Builds a FAISS IndexFlatL2.
         For large DBs prefer IVF,PQ or HNSW depending on memory/speed tradeoffs.
         """
-        if self.faiss_index is not None:
-            return
         self.faiss_index = faiss.IndexFlatL2(d)
-
-    def _ensure_faiss_index(self, use_gpu=False):
-        """
-        Builds a FAISS IndexFlatL2 over self.hashes if not exists.
-        Conversion from list to array happens lazily here.
-        The values from each fingerprint are appended to lists when the store() method is called,
-        here we convert this lists to numpy arrays and build the index.
-        """
-        if self.faiss_index is not None:
-            return
-        # converter listas para arrays caso existam
-        if self._hashes_list:
-            self.hashes = np.array(self._hashes_list, dtype=np.float32).reshape(-1, 4)
-            self._hashes_list = []
-
-        if self._quad_Ax_list:
-            self.quad_Ax = np.array(self._quad_Ax_list, dtype=np.int32)
-            self.quad_Ay = np.array(self._quad_Ay_list, dtype=np.int32)
-            self.quad_Cx = np.array(self._quad_Cx_list, dtype=np.int32)
-            self.quad_Cy = np.array(self._quad_Cy_list, dtype=np.int32)
-            self.quad_Dx = np.array(self._quad_Dx_list, dtype=np.int32)
-            self.quad_Dy = np.array(self._quad_Dy_list, dtype=np.int32)
-            self.quad_Bx = np.array(self._quad_Bx_list, dtype=np.int32)
-            self.quad_By = np.array(self._quad_By_list, dtype=np.int32)
-            self.quad_recordid = np.array(self._quad_recordid_list, dtype=np.int32)
-            # liberar listas
-            self._quad_Ax_list = []
-            self._quad_Ay_list = []
-            self._quad_Cx_list = []
-            self._quad_Cy_list = []
-            self._quad_Dx_list = []
-            self._quad_Dy_list = []
-            self._quad_Bx_list = []
-            self._quad_By_list = []
-            self._quad_recordid_list = []
-
-        if self._peaks_x_list:
-            self.peaks_x = np.array(self._peaks_x_list, dtype=np.int32)
-            self.peaks_y = np.array(self._peaks_y_list, dtype=np.int32)
-            self._peaks_x_list = []
-            self._peaks_y_list = []
-
-        # creates faiss index and add hashes vector to index
-        self._create_faiss_index()
-        if self.hashes.shape[0] > 0:
-            print("Vectors dimension: ", self.hashes.shape)
-            
-            start_add = time.time()
-            self.faiss_index.add(self.hashes)
-            end_add = time.time()
-            print("Adding hashes to index: ", end_add - start_add)
-
 
     # --------------------
     # STORING FUNCTIONS
@@ -227,8 +158,7 @@ class InMemoryQfpDB:
 
     def store(self, fp, title):
         """
-        Store a ReferenceFingerprint (in memory) using lists to acumulate data.
-        This is done to avoid large reallocations off numpy arrays on each store() call. 
+        Store a ReferenceFingerprint (in memory).
         """
         if fp.fp_type != fpType.Reference:
             raise TypeError("May only store reference fingerprints in db")
@@ -241,44 +171,56 @@ class InMemoryQfpDB:
         self._next_recordid += 1
 
         # 1) store peaks
-        start = len(self._peaks_x_list)
-        for p in fp.peaks:
-            self._peaks_x_list.append(int(p.x))
-            self._peaks_y_list.append(int(p.y))
-        end = len(self._peaks_x_list)
-        self.peak_offsets[recordid] = (start, end)
+        new_peaks_x = np.array([p.x for p in fp.peaks], dtype=np.int32)
+        new_peaks_y = np.array([p.y for p in fp.peaks], dtype=np.int32)
+        start_peak = len(self.peaks_x)
+        self.peaks_x = np.concatenate([self.peaks_x, new_peaks_x])
+        self.peaks_y = np.concatenate([self.peaks_y, new_peaks_y])
+        end_peak = len(self.peaks_x)
+        self.peak_offsets[recordid] = (start_peak, end_peak)
 
         # 2) store quads
         n_quads = len(fp.strongest)
-        for q in fp.strongest:
-            self._quad_Ax_list.append(int(q.A.x))
-            self._quad_Ay_list.append(int(q.A.y))
-            self._quad_Cx_list.append(int(q.C.x))
-            self._quad_Cy_list.append(int(q.C.y))
-            self._quad_Dx_list.append(int(q.D.x))
-            self._quad_Dy_list.append(int(q.D.y))
-            self._quad_Bx_list.append(int(q.B.x))
-            self._quad_By_list.append(int(q.B.y))
-            self._quad_recordid_list.append(recordid)
+        
+        new_quad_Ax = np.array([q.A.x for q in fp.strongest], dtype=np.int32)
+        new_quad_Ay = np.array([q.A.y for q in fp.strongest], dtype=np.int32)
+        new_quad_Cx = np.array([q.C.x for q in fp.strongest], dtype=np.int32)
+        new_quad_Cy = np.array([q.C.y for q in fp.strongest], dtype=np.int32)
+        new_quad_Dx = np.array([q.D.x for q in fp.strongest], dtype=np.int32)
+        new_quad_Dy = np.array([q.D.y for q in fp.strongest], dtype=np.int32)
+        new_quad_Bx = np.array([q.B.x for q in fp.strongest], dtype=np.int32)
+        new_quad_By = np.array([q.B.y for q in fp.strongest], dtype=np.int32)
+        new_quad_recordid = np.full(n_quads, recordid, dtype=np.int32)
+
+        self.quad_Ax = np.concatenate([self.quad_Ax, new_quad_Ax])
+        self.quad_Ay = np.concatenate([self.quad_Ay, new_quad_Ay])
+        self.quad_Cx = np.concatenate([self.quad_Cx, new_quad_Cx])
+        self.quad_Cy = np.concatenate([self.quad_Cy, new_quad_Cy])
+        self.quad_Dx = np.concatenate([self.quad_Dx, new_quad_Dx])
+        self.quad_Dy = np.concatenate([self.quad_Dy, new_quad_Dy])
+        self.quad_Bx = np.concatenate([self.quad_Bx, new_quad_Bx])
+        self.quad_By = np.concatenate([self.quad_By, new_quad_By])
+        self.quad_recordid = np.concatenate([self.quad_recordid, new_quad_recordid])
+
 
         # 3) store hashes
-        for h in fp.hashes:
-            self._hashes_list.append(list(h))  # garante 4 elementos
+        new_hashes = np.array(fp.hashes, dtype=np.float32).reshape(-1, 4)
+        self.hashes = np.concatenate([self.hashes, new_hashes])
+        self.faiss_index.add(new_hashes)
+        start_hash = self.hashes.shape[0] - n_quads
+
 
         # 4) update fidindex
         self.fidindex[title] = {
             'recordid': recordid,
             'title': title,
             'num_peaks': len(fp.peaks),
-            'peak_start': start,
-            'peak_end': end,
+            'peak_start': start_peak,
+            'peak_end': end_peak,
             'num_quads': n_quads,
-            'quad_start': len(self._hashes_list) - n_quads if n_quads > 0 else 0,
-            'quad_end': len(self._hashes_list)
+            'quad_start': start_hash,
+            'quad_end': start_hash + n_quads
         }
-
-        # 5) invalidate FAISS
-        self.faiss_index = None
 
         # print(f"Stored record '{title}' with recordid {recordid}, peaks {len(fp.peaks)}, quads {n_quads}")
 
@@ -321,15 +263,21 @@ class InMemoryQfpDB:
         """
         print("qHashes type: ", type(qHashes))
         print("qHashes len: ", len(qHashes), " type: ", type(qHashes[0]))
-        start_ensure = time.time()
-        self._ensure_faiss_index()
-        end_ensure = time.time()
-        print("Faiss index ensure time: ", end_ensure - start_ensure)
+        # start_ensure = time.time()
+        # self._ensure_faiss_index()
+        # end_ensure = time.time()
+        # print("Faiss index ensure time: ", end_ensure - start_ensure)
         start_numpy = time.time()
         qmat = np.ascontiguousarray(qHashes, dtype=np.float32)
         end_numpy = time.time()
         print("qHashes conversion to numpy time: ", end_numpy - start_numpy)
         lims, D, I = self.faiss_index.range_search(qmat, radius * radius)
+        print("Faiss I: ", I)
+        print("Faiss I type: ", type(I))
+        print("Faiss I shape: ", I.shape)
+        print("Faiss lims: ", lims)
+        print("Faiss lims type: ", type(lims))
+        print("Faiss lims shape: ", lims.shape)
         return lims, D, I
 
 
@@ -430,6 +378,8 @@ class InMemoryQfpDB:
 
         # 4. Validação
         matches = []
+        print("Recordid: ", mc[0].recordid)
+        print("Recordid type: ", type(mc[0].recordid))
         for m in mc:
             vScore = self._validate_match(m, fp)
             if vScore >= vThreshold:
