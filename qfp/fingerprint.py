@@ -57,21 +57,16 @@ class Fingerprint:
         Creates quad hashes for a given audio file
         """
         q, r, c, w, h = self.params
-        # print("pegou params")
         samples = load_audio(self.path, snip=snip)
-        # print("carregou audio")
         spectrogram = stft(samples)
-        # print("fez o spectograma")
+        # TODO: refactor find peaks to return a ndarray of peaks
         self.peaks = list(find_peaks(spectrogram, w, h))
         # self.save_spectrogram_with_peaks(spectrogram, self.peaks)
-        # print("encontrou picos")
         # quads = find_quads(self.peaks, r, c)
-        # # print("encontrou quads")
         # self.strongest = n_strongest(spectrogram, quads, q)
+        # TODO: refactor find_quads_stream_v2 to return a ndarray of quads
         self.strongest = find_quads_stream_v2(self.peaks, r, c, spectrogram, q)
-        # print("selecionou os mais fortes")
         self.hashes = [generate_hash(q) for q in self.strongest]
-        # print("gerou hashes")
     
     def save_spectrogram_with_peaks(self, spectrogram, peaks, out_dir="plots"):
         """
