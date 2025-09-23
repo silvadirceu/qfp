@@ -226,7 +226,7 @@ class InMemoryQfpDB:
 
 
     def store_from_pickle(self, pickle_path, title=None):
-        fp = ReferenceFingerprint.load_from_pickle(pickle_path)
+        fp = ReferenceFingerprint.load_from_pickle2(pickle_path)
         if title is None:
             title = os.path.splitext(os.path.basename(fp.path))[0]
         self.store(fp, title)
