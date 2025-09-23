@@ -51,6 +51,10 @@ class Fingerprint:
                 "Fingerprint must be of type 'Reference' or 'Query'")
         else:
             self.params = fp_type
+            self.params = fp_type
+            self.peaks = np.empty((0, 2), dtype=np.int64)
+            self.strongest = np.empty((0, 8), dtype=np.int64)
+            self.hashes = np.empty((0, 4), dtype=np.float64)
 
     def create(self, snip=None):
         """
@@ -60,14 +64,14 @@ class Fingerprint:
         samples = load_audio(self.path, snip=snip)
         spectrogram = stft(samples)
         # TODO: refactor find peaks to return a ndarray of peaks
-        self.peaks = list(find_peaks(spectrogram, w, h))
+        self.peaks = find_peaks(spectrogram, w, h)
         # self.save_spectrogram_with_peaks(spectrogram, self.peaks)
         # quads = find_quads(self.peaks, r, c)
         # self.strongest = n_strongest(spectrogram, quads, q)
         # TODO: refactor find_quads_stream_v2 to return a ndarray of quads
         self.strongest = find_quads_stream_v2(self.peaks, r, c, spectrogram, q)
-        self.hashes = [generate_hash(q) for q in self.strongest]
-    
+        self.hashes = np.vstack([generate_hash(q) for q in self.strongest])
+
     def save_spectrogram_with_peaks(self, spectrogram, peaks, out_dir="plots"):
         """
         Salva o espectrograma em escala logarítmica com os picos encontrados.
@@ -163,27 +167,27 @@ class ReferenceFingerprint(Fingerprint):
         pickle_filename = f"{audio_filename}_fingerprint.pkl"
         pickle_path = os.path.join(pickle_dir, pickle_filename)
         
-        # Convert namedtuples to simple tuples to avoid pickle issues
-        peaks_data = [(peak.x, peak.y) for peak in self.peaks]
+        # # Convert namedtuples to simple tuples to avoid pickle issues
+        # peaks_data = [(peak.x, peak.y) for peak in self.peaks]
         
-        # Convert strongest quads to serializable format
-        strongest_data = []
-        for quad in self.strongest:
-            quad_data = {
-                'A': (quad.A.x, quad.A.y),
-                'C': (quad.C.x, quad.C.y),
-                'D': (quad.D.x, quad.D.y),
-                'B': (quad.B.x, quad.B.y)
-            }
-            strongest_data.append(quad_data)
+        # # Convert strongest quads to serializable format
+        # strongest_data = []
+        # for quad in self.strongest:
+        #     quad_data = {
+        #         'A': (quad.A.x, quad.A.y),
+        #         'C': (quad.C.x, quad.C.y),
+        #         'D': (quad.D.x, quad.D.y),
+        #         'B': (quad.B.x, quad.B.y)
+        #     }
+        #     strongest_data.append(quad_data)
         
         # Prepare data to pickle (all important attributes)
         fingerprint_data = {
             'path': self.path,
             'fp_type': self.fp_type,
             'params': self.params,
-            'peaks': peaks_data,
-            'strongest': strongest_data,
+            'peaks': self.peaks,
+            'strongest': self.strongest,
             'hashes': self.hashes
         }
         
@@ -204,34 +208,71 @@ class ReferenceFingerprint(Fingerprint):
         Returns:
             ReferenceFingerprint: Recreated fingerprint object
         """
-        
         with open(pickle_path, 'rb') as f:
             fingerprint_data = pickle.load(f)
         
         # Create new instance
         fingerprint = cls(fingerprint_data['path'])
         
-        # Restore basic attributes
         fingerprint.fp_type = fingerprint_data['fp_type']
         fingerprint.params = fingerprint_data['params']
         fingerprint.hashes = fingerprint_data['hashes']
         
-        # Restore peaks from tuple data
-        fingerprint.peaks = [Peak(x, y) for x, y in fingerprint_data['peaks']]
+        fingerprint.peaks = np.array([(p.x, p.y) for p in fingerprint_data['peaks']], dtype=np.int64)
         
         # Restore strongest quads from dict data
-        fingerprint.strongest = []
-        for quad_data in fingerprint_data['strongest']:
-            quad = Quad(
-                A=Peak(quad_data['A'][0], quad_data['A'][1]),
-                C=Peak(quad_data['C'][0], quad_data['C'][1]),
-                D=Peak(quad_data['D'][0], quad_data['D'][1]),
-                B=Peak(quad_data['B'][0], quad_data['B'][1])
-            )
-            fingerprint.strongest.append(quad)
+        strongest_list = []
+        quads = fingerprint_data['strongest']
+        for quad in quads:
+            strongest_list.append([
+                quad['A'][0], quad['A'][1],
+                quad['C'][0], quad['C'][1],
+                quad['D'][0], quad['D'][1],
+                quad['B'][0], quad['B'][1]
+            ])
         
+        fingerprint.strongest = np.array(strongest_list, dtype=np.int64)
+
         return fingerprint
 
+    # ONLY FOR LOAD THE EXTRACTED PICKLES FROM OLD VERSION
+    @classmethod
+    def load_from_pickle2(cls, pickle_path):
+        """
+        Recreates a ReferenceFingerprint object from a pickle file
+        
+        Args:
+            pickle_path (str): Path to the pickle file
+            
+        Returns:
+            ReferenceFingerprint: Recreated fingerprint object
+        """
+        with open(pickle_path, 'rb') as f:
+            fingerprint_data = pickle.load(f)
+        
+        # Create new instance
+        fingerprint = cls(fingerprint_data['path'])
+        
+        fingerprint.fp_type = fingerprint_data['fp_type']
+        fingerprint.params = fingerprint_data['params']
+        fingerprint.hashes = fingerprint_data['hashes']
+        
+        fingerprint.peaks = fingerprint_data['peaks']
+        
+        # Restore strongest quads from dict data
+        strongest_list = []
+        quads = fingerprint_data['strongest']
+        for quad in quads:
+            strongest_list.append([
+                quad['A'][0], quad['A'][1],
+                quad['C'][0], quad['C'][1],
+                quad['D'][0], quad['D'][1],
+                quad['B'][0], quad['B'][1]
+            ])
+        
+        fingerprint.strongest = np.array(strongest_list, dtype=np.int64)
+
+        return fingerprint
 
 class QueryFingerprint(Fingerprint):
 
