@@ -47,8 +47,7 @@ def find_peaks(spec, maxWidth, maxHeight, minWidth=3, minHeight=3):
     peaks = ((spec == maxima) == (maxima != minima))
     # todo: parabolic interpolation
     x, y = np.nonzero(peaks)
-    namedpeaks = [Peak(p[0], p[1]) for p in zip(x, y)]
-    return namedpeaks
+    return np.stack((x, y), axis=-1).astype(np.int64)
 
 
 def n_strongest(spec, quads, n):
@@ -83,11 +82,26 @@ def _find_partitions(quads, l=250):
 def generate_hash(quad):
     """
     Compute translation- and scale-invariant hash from a given quad
+    Args:
+        quad = np.ndarray shape (8,), [Ax, Ay, Cx, Cy, Dx, Dy, Bx, By]
+    Returns:
+        np.ndarray shape (1,4), dtype float64
     """
-    A, C, D, B = quad
-    B = (B.x - A.x, B.y - A.y)
-    C = (C.x - A.x, C.y - A.y)
-    D = (D.x - A.x, D.y - A.y)
-    cDash = (C[0] / B[0], C[1] / B[1])
-    dDash = (D[0] / B[0], D[1] / B[1])
-    return cDash + dDash
+    Ax, Ay, Cx, Cy, Dx, Dy, Bx, By = quad
+
+    # Vetores relativos (normalizados em relação a A)
+    Bx_rel, By_rel = Bx - Ax, By - Ay
+    Cx_rel, Cy_rel = Cx - Ax, Cy - Ay
+    Dx_rel, Dy_rel = Dx - Ax, Dy - Ay
+
+    # Evitar divisão por zero
+    if Bx_rel == 0 or By_rel == 0:
+        return np.empty((0, 4), dtype=np.float64)
+
+    # Coordenadas normalizadas
+    cDash = (Cx_rel / Bx_rel, Cy_rel / By_rel)
+    dDash = (Dx_rel / Bx_rel, Dy_rel / By_rel)
+
+    # Retorna como ndarray (1,4)
+    return np.array([[cDash[0], cDash[1], dDash[0], dDash[1]]], dtype=np.float64)
+
