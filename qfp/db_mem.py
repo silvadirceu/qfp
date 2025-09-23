@@ -110,29 +110,16 @@ class InMemoryQfpDB:
         # counters
         self._next_recordid = 1
 
-        # peakfile: 1D arrays for X (time) and Y (freq) (dtype=int32)
-        self.peaks_x = np.empty((0,), dtype=np.int32)
-        self.peaks_y = np.empty((0,), dtype=np.int32)
-
-        self.peak_offsets = {}  # recordid -> (start, end)
-
-        # refrecords / quads: store quad coordinates as int32 columns
-        self.quad_Ax = np.empty((0,), dtype=np.int32)
-        self.quad_Ay = np.empty((0,), dtype=np.int32)
-        self.quad_Cx = np.empty((0,), dtype=np.int32)
-        self.quad_Cy = np.empty((0,), dtype=np.int32)
-        self.quad_Dx = np.empty((0,), dtype=np.int32)
-        self.quad_Dy = np.empty((0,), dtype=np.int32)
-        self.quad_Bx = np.empty((0,), dtype=np.int32)
-        self.quad_By = np.empty((0,), dtype=np.int32)
-        self.quad_recordid = np.empty((0,), dtype=np.int32)
-
-        # hashes array (float32 Nx4) in same order as quads
-        self.hashes = np.empty((0, 4), dtype=np.float32)
+        # Cache de arrays concatenados para busca eficiente (construídos sob demanda)
+        self._cached_arrays_valid = False
+        self._cached_all_quads = None
+        self._cached_quad_recordids = None
+        self._cached_all_peaks = None
+        self._cached_peak_offsets = None
 
 
         # FAISS index. We keep index_flat for simplicity.
-        self.faiss_index = faiss.IndexFlatL2(4)
+        self.faiss_index = self._create_faiss_index()
 
         # namedtuples
         self.Peak = namedtuple('Peak', ['x', 'y'])
@@ -150,7 +137,50 @@ class InMemoryQfpDB:
         Builds a FAISS IndexFlatL2.
         For large DBs prefer IVF,PQ or HNSW depending on memory/speed tradeoffs.
         """
-        self.faiss_index = faiss.IndexFlatL2(d)
+        return faiss.IndexFlatL2(d)
+
+    def _ensure_arrays_cached(self):
+        """Constrói arrays concatenados a partir do dicionário fingerprints se necessário"""
+        if self._cached_arrays_valid:
+            return
+            
+        # Concatenar todos os quads e hashes
+        all_quads_list = []
+        all_hashes_list = []
+        quad_recordids_list = []
+        
+        # Concatenar todos os picos
+        all_peaks_list = []
+        peak_offsets = {}
+        
+        current_quad_idx = 0
+        current_peak_idx = 0
+        
+        for title, data in self.fingerprints.items():
+            recordid = data['recordid']
+            
+            # Processar quads
+            num_quads = len(data['quads'])
+            if num_quads > 0:
+                all_quads_list.append(data['quads'])
+                all_hashes_list.append(data['hashes'])
+                quad_recordids_list.append(np.full(num_quads, recordid, dtype=np.int32))
+            
+            # Processar picos
+            num_peaks = len(data['peaks'])
+            if num_peaks > 0:
+                all_peaks_list.append(data['peaks'])
+                peak_offsets[recordid] = (current_peak_idx, current_peak_idx + num_peaks)
+                current_peak_idx += num_peaks
+        
+        # Concatenar arrays
+        self._cached_all_quads = np.vstack(all_quads_list) if all_quads_list else np.empty((0, 8), dtype=np.int32)
+        # self._cached_all_hashes = np.vstack(all_hashes_list) if all_hashes_list else np.empty((0, 4), dtype=np.float32)
+        self._cached_quad_recordids = np.concatenate(quad_recordids_list) if quad_recordids_list else np.empty((0,), dtype=np.int32)
+        self._cached_all_peaks = np.vstack(all_peaks_list) if all_peaks_list else np.empty((0, 2), dtype=np.int32)
+        self._cached_peak_offsets = peak_offsets
+        
+        self._cached_arrays_valid = True
 
     # --------------------
     # STORING FUNCTIONS
