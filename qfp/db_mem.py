@@ -20,111 +20,110 @@ except ImportError:
 # --------------------------
 # Núcleo numba (sem usar listas Python)
 # --------------------------
-@njit(cache=True, debug=True)
-def _filter_candidates_core(qQuads_arr, lims, I,
-                            quad_Ax, quad_Ay, quad_Bx, quad_By,
-                            quad_recordid, e_tolerance):
-    # Usar numba.typed.List para append dentro do njit
-    recordids = NumbaList()
+# @njit(cache=True, debug=True)
+def _filter_candidates_core(query_quads, candidates_quads, candidates_phonogram_code, e_tolerance):
+    phonogram_codes = NumbaList()
     offsets = NumbaList()
     sTimes = NumbaList()
     sFreqs = NumbaList()
 
-    n_queries = qQuads_arr.shape[0]
+    n_queries = query_quads.shape[0]
+    print("query_quads shape: ", query_quads.shape)
+    print("candidates_quads shape: ", len(candidates_quads))
 
     for qi in range(n_queries):
-        # qQuads_arr assumed float64: Ax,Ay,Bx,By,Cx,Cy,Dx,Dy
-        qAx = qQuads_arr[qi, 0]
-        qAy = qQuads_arr[qi, 1]
-        qBx = qQuads_arr[qi, 2]
-        qBy = qQuads_arr[qi, 3]
+        # query_quads assumed float64: Ax,Ay,Cx,Cy,Dx,Dy,Bx,By
+        qAx = float(query_quads[qi, 0])
+        qAy = float(query_quads[qi, 1])
+        qBx = float(query_quads[qi, 6])
+        qBy = float(query_quads[qi, 7])
 
-        start = lims[qi]
-        end = lims[qi + 1]
 
         # iterate indices in I[start:end]
-        for k in range(start, end):
-            idx = I[k]
+        for idx in range(len(candidates_quads[qi])):
+            # for i in
+                # recupera cQuad dos arrays; todos inteiros 
+                cAx = candidates_quads[qi][idx][0]
+                cAy = candidates_quads[qi][idx][1]
+                cBx = candidates_quads[qi][idx][6]
+                cBy = candidates_quads[qi][idx][7]
+                phonogram_code = candidates_phonogram_code[qi][idx]
 
-            # recupera cQuad dos arrays; todos inteiros 
-            cAx = quad_Ax[idx]
-            cAy = quad_Ay[idx]
-            cBx = quad_Bx[idx]
-            cBy = quad_By[idx]
-            recordid = quad_recordid[idx]
+                # Rough pitch coherence:
+                #   1/(1+e) <= queAy/canAy <= 1/(1-e)
+                if cAy == 0:
+                    continue
+                ratio = qAy / cAy
+                if not (1.0 / (1.0 + e_tolerance) <= ratio <= 1.0 / (1.0 - e_tolerance)):
+                    continue
 
-            # Rough pitch coherence:
-            #   1/(1+e) <= queAy/canAy <= 1/(1-e)
-            if cAy == 0:
-                continue
-            ratio = qAy / cAy
-            if not (1.0 / (1.0 + e_tolerance) <= ratio <= 1.0 / (1.0 - e_tolerance)):
-                continue
+                # X transformation tolerance check:
+                #   sTime = (queBx-queAx)/(canBx-canAx)
+                denom = (cBx - cAx)
+                if denom == 0:
+                    continue
+                sTime = (qBx - qAx) / denom
+                if not (1.0 / (1.0 + e_tolerance) <= sTime <= 1.0 / (1.0 - e_tolerance)):
+                    continue
 
-            # X transformation tolerance check:
-            #   sTime = (queBx-queAx)/(canBx-canAx)
-            denom = (cBx - cAx)
-            if denom == 0:
-                continue
-            sTime = (qBx - qAx) / denom
-            if not (1.0 / (1.0 + e_tolerance) <= sTime <= 1.0 / (1.0 - e_tolerance)):
-                continue
+                # Y transformation tolerance check:
+                #   sFreq = (queBy-queAy)/(canBy-canAy)
+                denom2 = (cBy - cAy)
+                if denom2 == 0:
+                    continue
+                sFreq = (qBy - qAy) / denom2
+                if not (1.0 / (1.0 + e_tolerance) <= sFreq <= 1.0 / (1.0 - e_tolerance)):
+                    continue
 
-            # Y transformation tolerance check:
-            #   sFreq = (queBy-queAy)/(canBy-canAy)
-            denom2 = (cBy - cAy)
-            if denom2 == 0:
-                continue
-            sFreq = (qBy - qAy) / denom2
-            if not (1.0 / (1.0 + e_tolerance) <= sFreq <= 1.0 / (1.0 - e_tolerance)):
-                continue
+                # Fine pitch coherence:
+                #   |queAy-canAy*sFreq| <= eFine
+                # Obs: qAy e cAy são floats/integer; operação segura
+                if abs(qAy - (cAy * sFreq)) > 1.8:
+                    continue
 
-            # Fine pitch coherence:
-            #   |queAy-canAy*sFreq| <= eFine
-            # Obs: qAy e cAy são floats/integer; operação segura
-            if abs(qAy - (cAy * sFreq)) > 1.8:
-                continue
+                # offset
+                offset = cAx - (qAx / sTime)
 
-            # offset
-            offset = cAx - (qAx / sTime)
+                # filtered[phonogram_code].append((float(off), (float(st), float(sf))))
+                # hist_dict = create_histogram(phonogram_code, float(off), (float(st), float(sf), hist_dict)
+                                 
 
-            # append em typed lists
-            recordids.append(recordid)
-            offsets.append(offset)
-            sTimes.append(sTime)
-            sFreqs.append(sFreq)
-    return recordids, offsets, sTimes, sFreqs
+    return phonogram_codes, offsets, sTimes, sFreqs
 
 class InMemoryQfpDB:
     """
     Implementação em memória das estruturas:
      - fidindex -> dict (title -> metadata)
      - peakfile -> numpy arrays concatenados (peaks_x, peaks_y) com offsets por record
-     - refrecords -> quads armazenados em numpy arrays (Ax,Ay,Cx,Cy,Dx,Dy,Bx,By) + recordid
+     - refrecords -> quads armazenados em numpy arrays (Ax,Ay,Cx,Cy,Dx,Dy,Bx,By) + phonogram_code
      - searchtree -> FAISS index sobre hashes (4-dim float32)
     """
 
-    def __init__(self, faiss_metric='L2'):
-        # metadata index: title -> dict {recordid, num_peaks, peak_start, peak_end, num_quads, quad_start, quad_end}
-        self.fidindex = {}
-        # counters
-        self._next_recordid = 1
+class InMemoryQfpDB:
+    """
+    Implementação em memória das estruturas:
+     - fidindex -> dict (title -> metadata)
+     - peakfile -> numpy arrays concatenados (peaks_x, peaks_y) com offsets por record
+     - refrecords -> quads armazenados em numpy arrays (Ax,Ay,Cx,Cy,Dx,Dy,Bx,By) + phonogram_code
+     - searchtree -> FAISS index sobre hashes (4-dim float32)
+    """
 
-        # Cache de arrays concatenados para busca eficiente (construídos sob demanda)
-        self._cached_arrays_valid = False
-        self._cached_all_quads = None
-        self._cached_quad_recordids = None
-        self._cached_all_peaks = None
-        self._cached_peak_offsets = None
+    def __init__(self):
+        # fingerprint reference database
+        # fonogram_code -> {'peaks', 'strongest', 'hashes}
+        self.fingerprints = {}
+        
+        # list of start indices of each fingerprint record in the FAISS index
+        self.border_list = [] 
 
+        # list of phonogram_code corresponding to each fingerprint record in the FAISS index
+        self.phonogram_code_list = []
 
         # FAISS index. We keep index_flat for simplicity.
         self.faiss_index = self._create_faiss_index()
 
         # namedtuples
-        self.Peak = namedtuple('Peak', ['x', 'y'])
-        self.Quad = namedtuple('Quad', ['A', 'C', 'D', 'B'])
-        mcNames = ['recordid', 'offset', 'num_matches', 'sTime', 'sFreq']
+        mcNames = ['phonogram_code', 'offset', 'num_matches', 'sTime', 'sFreq']
         self.MatchCandidate = namedtuple('MatchCandidate', mcNames)
         self.Match = namedtuple('Match', ['record', 'offset', 'vScore'])
 
@@ -138,125 +137,41 @@ class InMemoryQfpDB:
         For large DBs prefer IVF,PQ or HNSW depending on memory/speed tradeoffs.
         """
         return faiss.IndexFlatL2(d)
-
-    def _ensure_arrays_cached(self):
-        """Constrói arrays concatenados a partir do dicionário fingerprints se necessário"""
-        if self._cached_arrays_valid:
-            return
-            
-        # Concatenar todos os quads e hashes
-        all_quads_list = []
-        all_hashes_list = []
-        quad_recordids_list = []
-        
-        # Concatenar todos os picos
-        all_peaks_list = []
-        peak_offsets = {}
-        
-        current_quad_idx = 0
-        current_peak_idx = 0
-        
-        for title, data in self.fingerprints.items():
-            recordid = data['recordid']
-            
-            # Processar quads
-            num_quads = len(data['quads'])
-            if num_quads > 0:
-                all_quads_list.append(data['quads'])
-                all_hashes_list.append(data['hashes'])
-                quad_recordids_list.append(np.full(num_quads, recordid, dtype=np.int32))
-            
-            # Processar picos
-            num_peaks = len(data['peaks'])
-            if num_peaks > 0:
-                all_peaks_list.append(data['peaks'])
-                peak_offsets[recordid] = (current_peak_idx, current_peak_idx + num_peaks)
-                current_peak_idx += num_peaks
-        
-        # Concatenar arrays
-        self._cached_all_quads = np.vstack(all_quads_list) if all_quads_list else np.empty((0, 8), dtype=np.int32)
-        # self._cached_all_hashes = np.vstack(all_hashes_list) if all_hashes_list else np.empty((0, 4), dtype=np.float32)
-        self._cached_quad_recordids = np.concatenate(quad_recordids_list) if quad_recordids_list else np.empty((0,), dtype=np.int32)
-        self._cached_all_peaks = np.vstack(all_peaks_list) if all_peaks_list else np.empty((0, 2), dtype=np.int32)
-        self._cached_peak_offsets = peak_offsets
-        
-        self._cached_arrays_valid = True
-
+    
     # --------------------
     # STORING FUNCTIONS
     # --------------------
 
-    def store(self, fp, title):
+    def store(self, fp, phonogram_code):
         """
         Store a ReferenceFingerprint (in memory).
         """
         if fp.fp_type != fpType.Reference:
             raise TypeError("May only store reference fingerprints in db")
 
-        if title in self.fidindex:
-            print(f"record already exists: {title}")
+        if phonogram_code in self.fingerprints:
+            print(f"record already exists: {phonogram_code}")
             return
 
-        recordid = self._next_recordid
-        self._next_recordid += 1
-
-        # 1) store peaks
-        new_peaks_x = np.array([p.x for p in fp.peaks], dtype=np.int32)
-        new_peaks_y = np.array([p.y for p in fp.peaks], dtype=np.int32)
-        start_peak = len(self.peaks_x)
-        self.peaks_x = np.concatenate([self.peaks_x, new_peaks_x])
-        self.peaks_y = np.concatenate([self.peaks_y, new_peaks_y])
-        end_peak = len(self.peaks_x)
-        self.peak_offsets[recordid] = (start_peak, end_peak)
-
-        # 2) store quads
-        n_quads = len(fp.strongest)
-        
-        new_quad_Ax = np.array([q.A.x for q in fp.strongest], dtype=np.int32)
-        new_quad_Ay = np.array([q.A.y for q in fp.strongest], dtype=np.int32)
-        new_quad_Cx = np.array([q.C.x for q in fp.strongest], dtype=np.int32)
-        new_quad_Cy = np.array([q.C.y for q in fp.strongest], dtype=np.int32)
-        new_quad_Dx = np.array([q.D.x for q in fp.strongest], dtype=np.int32)
-        new_quad_Dy = np.array([q.D.y for q in fp.strongest], dtype=np.int32)
-        new_quad_Bx = np.array([q.B.x for q in fp.strongest], dtype=np.int32)
-        new_quad_By = np.array([q.B.y for q in fp.strongest], dtype=np.int32)
-        new_quad_recordid = np.full(n_quads, recordid, dtype=np.int32)
-
-        self.quad_Ax = np.concatenate([self.quad_Ax, new_quad_Ax])
-        self.quad_Ay = np.concatenate([self.quad_Ay, new_quad_Ay])
-        self.quad_Cx = np.concatenate([self.quad_Cx, new_quad_Cx])
-        self.quad_Cy = np.concatenate([self.quad_Cy, new_quad_Cy])
-        self.quad_Dx = np.concatenate([self.quad_Dx, new_quad_Dx])
-        self.quad_Dy = np.concatenate([self.quad_Dy, new_quad_Dy])
-        self.quad_Bx = np.concatenate([self.quad_Bx, new_quad_Bx])
-        self.quad_By = np.concatenate([self.quad_By, new_quad_By])
-        self.quad_recordid = np.concatenate([self.quad_recordid, new_quad_recordid])
-
-
-        # 3) store hashes
-        new_hashes = np.array(fp.hashes, dtype=np.float32).reshape(-1, 4)
-        self.hashes = np.concatenate([self.hashes, new_hashes])
-        self.faiss_index.add(new_hashes)
-        start_hash = self.hashes.shape[0] - n_quads
-
-
-        # 4) update fidindex
-        self.fidindex[title] = {
-            'recordid': recordid,
-            'title': title,
-            'num_peaks': len(fp.peaks),
-            'peak_start': start_peak,
-            'peak_end': end_peak,
-            'num_quads': n_quads,
-            'quad_start': start_hash,
-            'quad_end': start_hash + n_quads
+        self.fingerprints[phonogram_code] = {
+            'peaks': fp.peaks,
+            'strongest': fp.strongest,
+            'hashes': fp.hashes
         }
 
-        # print(f"Stored record '{title}' with recordid {recordid}, peaks {len(fp.peaks)}, quads {n_quads}")
+        n_vectors = self.faiss_index.ntotal
+        start = n_vectors
+
+        self.faiss_index.add(fp.hashes)
+
+        self.border_list.append(start)
+        self.phonogram_code_list.append(phonogram_code)
+
+        # print(f"Stored record '{title}' with phonogram_code {phonogram_code}, peaks {len(fp.peaks)}, quads {n_quads}")
 
 
     def store_from_pickle(self, pickle_path, title=None):
-        fp = ReferenceFingerprint.load_from_pickle2(pickle_path)
+        fp = ReferenceFingerprint.load_from_pickle(pickle_path)
         if title is None:
             title = os.path.splitext(os.path.basename(fp.path))[0]
         self.store(fp, title)
@@ -280,27 +195,23 @@ class InMemoryQfpDB:
     # QUERY / SEARCH FLOW
     # --------------------
 
-    def _faiss_batch_search(self, qHashes, radius):
+    def _faiss_batch_search(self, query_hashes, radius):
         """
-        Executa uma busca em batch no FAISS para todos os qHashes.
+        Executa uma busca em batch no FAISS para todos os query_hashes.
 
         Args:
-            qHashes: np.array (N, 4) com os hashes da query.
+            query_hashes: np.array (N, 4) com os hashes da query.
             radius: raio L2 (não quadrado).
 
         Returns:
             lims, D, I -> saída bruta do faiss.range_search
         """
-        print("qHashes type: ", type(qHashes))
-        print("qHashes len: ", len(qHashes), " type: ", type(qHashes[0]))
-        # start_ensure = time.time()
-        # self._ensure_faiss_index()
-        # end_ensure = time.time()
-        # print("Faiss index ensure time: ", end_ensure - start_ensure)
+        print("query_hashes type: ", type(query_hashes))
+        print("query_hashes len: ", len(query_hashes), " type: ", type(query_hashes[0]))
         start_numpy = time.time()
-        qmat = np.ascontiguousarray(qHashes, dtype=np.float32)
+        qmat = np.ascontiguousarray(query_hashes, dtype=np.float32)
         end_numpy = time.time()
-        print("qHashes conversion to numpy time: ", end_numpy - start_numpy)
+        print("query_hashes conversion to numpy time: ", end_numpy - start_numpy)
         lims, D, I = self.faiss_index.range_search(qmat, radius * radius)
         print("Faiss I: ", I)
         print("Faiss I type: ", type(I))
@@ -314,71 +225,72 @@ class InMemoryQfpDB:
     # ==========================
     # Função wrapper híbrida
     # ==========================
-    def filter_candidates_hybrid(self, qHashes, qQuads, lims, I, e_tolerance):
+    
+    def filter_candidates_hybrid(self, query_quads, candidates_quads, candidates_phonogram_code, e_tolerance):
         """
         wrapper: converte qQuads para ndarray, valida dtypes e chama o núcleo numba.
-        Retorna filtered dict {recordid: [(offset, (sTime, sFreq)), ...]}
+        Retorna filtered dict {phonogram_code: [(offset, (sTime, sFreq)), ...]}
         """
 
-        # 1) converter qQuads (lista de Quad(namedtuple)) -> numpy float64 (n,8)
-        n = len(qQuads)
-        qQuads_arr = np.zeros((n, 8), dtype=np.float64)
-        for i, quad in enumerate(qQuads):
-            qQuads_arr[i, 0] = float(quad.A.x)
-            qQuads_arr[i, 1] = float(quad.A.y)
-            qQuads_arr[i, 2] = float(quad.B.x)
-            qQuads_arr[i, 3] = float(quad.B.y)
-            qQuads_arr[i, 4] = float(quad.C.x)
-            qQuads_arr[i, 5] = float(quad.C.y)
-            qQuads_arr[i, 6] = float(quad.D.x)
-            qQuads_arr[i, 7] = float(quad.D.y)
+        # # 1) converter qQuads (lista de Quad(namedtuple)) -> numpy float64 (n,8)
+        # n = len(qQuads)
+        # qQuads_arr = np.zeros((n, 8), dtype=np.float64)
+        # for i, quad in enumerate(qQuads):
+        #     qQuads_arr[i, 0] = float(quad.A.x)
+        #     qQuads_arr[i, 1] = float(quad.A.y)
+        #     qQuads_arr[i, 2] = float(quad.B.x)
+        #     qQuads_arr[i, 3] = float(quad.B.y)
+        #     qQuads_arr[i, 4] = float(quad.C.x)
+        #     qQuads_arr[i, 5] = float(quad.C.y)
+        #     qQuads_arr[i, 6] = float(quad.D.x)
+        #     qQuads_arr[i, 7] = float(quad.D.y)
 
-        # 2) garantir que lims e I são numpy arrays de inteiros (contíguos)
-        lims_arr = np.ascontiguousarray(lims)   # geralmente int64
-        I_arr = np.ascontiguousarray(I)         # geralmente int64
+        # # 2) garantir que lims e I são numpy arrays de inteiros (contíguos)
+        # lims_arr = np.ascontiguousarray(lims)   # geralmente int64
+        # I_arr = np.ascontiguousarray(I)         # geralmente int64
 
         # 3) garantir arrays da classe são contíguos e do dtype adequado
         # quad_* podem ser int32; numba aceita int32/int64 para indexação.
-        quad_Ax = np.ascontiguousarray(self.quad_Ax)
-        quad_Ay = np.ascontiguousarray(self.quad_Ay)
-        quad_Bx = np.ascontiguousarray(self.quad_Bx)
-        quad_By = np.ascontiguousarray(self.quad_By)
-        quad_recordid = np.ascontiguousarray(self.quad_recordid)
+        # quad_Ax = np.ascontiguousarray(self.quad_Ax)
+        # quad_Ay = np.ascontiguousarray(self.quad_Ay)
+        # quad_Bx = np.ascontiguousarray(self.quad_Bx)
+        # quad_By = np.ascontiguousarray(self.quad_By)
+        # quad_phonogram_code = np.ascontiguousarray(self.quad_phonogram_code)
 
         # 4) chama núcleo numba
         rec_list, off_list, st_list, sf_list = _filter_candidates_core(
-            qQuads_arr, lims_arr, I_arr,
-            quad_Ax, quad_Ay, quad_Bx, quad_By,
-            quad_recordid, float(e_tolerance)
+            query_quads, 
+            candidates_quads, 
+            candidates_phonogram_code, 
+            float(e_tolerance)
         )
 
         # 5) converte numba.typed.List para numpy arrays em Python
         # rec_list é um numba.typed.List — iterável como lista normal
-        recordids = np.array(list(rec_list), dtype=np.int64)
+        phonogram_codes = list(rec_list)
         offsets = np.array(list(off_list), dtype=np.float64)
         sTimes = np.array(list(st_list), dtype=np.float64)
         sFreqs = np.array(list(sf_list), dtype=np.float64)
 
         # 6) agrupa no formato original (defaultdict(list))
         filtered = defaultdict(list)
-        for rid, off, st, sf in zip(recordids, offsets, sTimes, sFreqs):
-            filtered[int(rid)].append((float(off), (float(st), float(sf))))
+        for phon_code, off, st, sf in zip(phonogram_codes, offsets, sTimes, sFreqs):
+            filtered[phon_code].append((float(off), (float(st), float(sf))))
 
         return filtered
 
 
-    def _filter_candidates(self, qHashes, qQuads, lims, I, e_tolerance):
-        return self.filter_candidates_hybrid(qHashes, qQuads, lims, I, e_tolerance)
+    def _filter_candidates(self, query_quads, candidates_quads, candidates_phonogram_code, e_tolerance):
+        return self.filter_candidates_hybrid(query_quads, candidates_quads, candidates_phonogram_code, e_tolerance)
 
 
-    def query(self, fp, vThreshold=0.5, e_radius=0.1, radius_l2=None):
-        if fp.fp_type != fpType.Query:
+    def query(self, fp_query, vThreshold=0.5, e_radius=0.1, radius_l2=None):
+        if fp_query.fp_type != fpType.Query:
             raise TypeError("May only query db with query fingerprints")
 
         # preparar query peaks
-        qPeaks = [(int(p.x), int(p.y)) for p in fp.peaks]
-        qPeaks.sort(key=lambda p: p[0])
-        fp._qPeaks_sorted = qPeaks
+        fp_query._query_Peaks_sorted = fp_query.peaks[fp_query.peaks[:, 0].argsort()]
+
 
         if radius_l2 is None:
             radius = math.sqrt(4) * e_radius
@@ -387,44 +299,67 @@ class InMemoryQfpDB:
 
         # 1. FAISS batch search
         faiss_search_start = time.time()
-        lims, D, I = self._faiss_batch_search(fp.hashes, radius)
+        lims, D, I = self._faiss_batch_search(fp_query.hashes, radius)
         faiss_search_end = time.time()
+        faiss_index = [I[start:end] for start, end in zip(lims[:-1], lims[1:])]
+            
+        candidates_quads_all = []
+        candidates_phonogram_code_all = []
+        for start, end in zip(lims[:-1], lims[1:]):
+            idx_faiss = I[start:end]
+            # 1) Encontrar os intervalos de cada índice
+            interval_idx = np.searchsorted(self.border_list, idx_faiss, side='right') - 1
 
-        # 2. Aplicar filtros nos resultados
-        filter_start = time.time()
-        filtered = self._filter_candidates(fp.hashes, fp.strongest, lims, I, e_tolerance=0.2)
-        filter_end = time.time()
+            # 2) Pegar o phonogram_code correspondente a cada índice
+            # list_phonogram_code_ref = self.phonogram_code_list[interval_idx]
+            list_phonogram_code_ref = [self.phonogram_code_list[i] for i in interval_idx]
 
-        # 3. Bin times + scales
+            # 3) Pegar a posição relativa dentro do intervalo
+            # list_musicid_index_ref = idx_faiss - self.border_list[interval_idx]
+            list_phonogram_code_index_ref = [i - self.border_list[j] for i, j in zip(idx_faiss, interval_idx)]
+
+            # list_quads_ref = self.fingerprints[list_phonogram_code_ref]['strongest'][list_phonogram_code_index_ref]
+            list_quads_ref = [
+                self.fingerprints[pc]['strongest'][idx]
+                for pc, idx in zip(list_phonogram_code_ref, list_phonogram_code_index_ref)
+            ]
+        #     candidates_quads_all.append(list_quads_ref)
+        #     candidates_phonogram_code_all.append(list_phonogram_code_ref)
+
+        # filter_start = time.time()
+        filtered = self._filter_candidates(fp_query.strongest, candidates_quads_all, candidates_phonogram_code_all, e_tolerance=0.2)
+        # filter_end = time.time()
+       
+        # # 3. Bin times + scales
         bin_start = time.time()
         binned = {k: self._bin_times(v) for k, v in filtered.items()}
         bin_end = time.time()
-        results_start = time.time()
-        results = {k: self._scales(v) for k, v in binned.items() if len(v) >= 4}
-        results_end = time.time()
-        matches_start = time.time()
-        mc = [self.MatchCandidate(k, a[0], a[1], a[2][0], a[2][1])
-              for k, v in results.items() for a in v]
+        # results_start = time.time()
+        # results = {k: self._scales(v) for k, v in binned.items() if len(v) >= 4}
+        # results_end = time.time()
+        # matches_start = time.time()
+        # match_candidate = [self.MatchCandidate(k, a[0], a[1], a[2][0], a[2][1])
+        #       for k, v in results.items() for a in v]
 
-        # 4. Validação
-        matches = []
-        print("Recordid: ", mc[0].recordid)
-        print("Recordid type: ", type(mc[0].recordid))
-        for m in mc:
-            vScore = self._validate_match(m, fp)
-            if vScore >= vThreshold:
-                title = self._lookup_record_title(m.recordid)
-                matches.append(self.Match(title, m.offset, vScore))
-        matches_end = time.time()
-        fp.match_candidates = mc
-        fp.matches = matches
+        # # 4. Validação
+        # matches = []
+        # print("phonogram_code: ", match_candidate[0].phonogram_code)
+        # print("phonogram_code type: ", type(match_candidate[0].phonogram_code))
+        # for candidate in match_candidate:
+        #     vScore = self._validate_match(candidate, fp_query)
+        #     if vScore >= vThreshold:
+        #         # title = self._lookup_record_title(candidate.phonogram_code)
+        #         matches.append(self.Match(candidate.phonogram_code, candidate.offset, vScore))
+        # matches_end = time.time()
+        # fp_query.match_candidates = match_candidate
+        # fp_query.matches = matches
 
-        print(f"FAISS search time: {faiss_search_end - faiss_search_start:.3f}s")
-        print(f"Filtering time: {filter_end - filter_start:.3f}s")
-        print(f"Bin times time: {bin_end - bin_start:.3f}s")
-        print(f"Results time: {results_end - results_start:.3f}s")
-        print(f"Total matches time: {matches_end - matches_start:.3f}s")
-        return fp.matches
+        # print(f"FAISS search time: {faiss_search_end - faiss_search_start:.3f}s")
+        # print(f"Filtering time: {filter_end - filter_start:.3f}s")
+        # print(f"Bin times time: {bin_end - bin_start:.3f}s")
+        # print(f"Results time: {results_end - results_start:.3f}s")
+        # print(f"Total matches time: {matches_end - matches_start:.3f}s")
+        # return fp_query.matches
 
     # --------------------
     # Helper methods for QFP thecnique
@@ -432,14 +367,14 @@ class InMemoryQfpDB:
 
     def _lookup_quad_by_index(self, idx):
         """
-        Given a row index in self.hashes / quads, returns Quad(namedtuple) and recordid
+        Given a row index in self.hashes / quads, returns Quad(namedtuple) and phonogram_code
         """
         A = self.Peak(int(self.quad_Ax[idx]), int(self.quad_Ay[idx]))
         C = self.Peak(int(self.quad_Cx[idx]), int(self.quad_Cy[idx]))
         D = self.Peak(int(self.quad_Dx[idx]), int(self.quad_Dy[idx]))
         B = self.Peak(int(self.quad_Bx[idx]), int(self.quad_By[idx]))
-        recordid = int(self.quad_recordid[idx])
-        return self.Quad(A, C, D, B), recordid
+        phonogram_code = int(self.quad_phonogram_code[idx])
+        return self.Quad(A, C, D, B), phonogram_code
 
     def _bin_times(self, l, binwidth=20, ts=4):
         d = defaultdict(list)
@@ -464,20 +399,20 @@ class InMemoryQfpDB:
         sorted_mc = sorted(res, key=operator.itemgetter(1), reverse=True)
         return sorted_mc
 
-    def _lookup_peak_range(self, recordid, offset, e=3750):
+    def _lookup_peak_range(self, phonogram_code, offset, e=3750):
         """
-        Return peaks for given recordid in range [offset, offset+e]
+        Return peaks for given phonogram_code in range [offset, offset+e]
         """
-        if recordid not in self.peak_offsets:
-            return []
-        start, end = self.peak_offsets[recordid]
-        xs = self.peaks_x[start:end]
-        ys = self.peaks_y[start:end]
-        # filter by X range
-        mask = (xs >= offset) & (xs <= offset + e)
-        sel_x = xs[mask]
-        sel_y = ys[mask]
-        return [self.Peak(int(x), int(y)) for x, y in zip(sel_x, sel_y)]
+        if phonogram_code not in self.fingerprints:
+            return np.empty((0, 2), dtype=int)
+
+        peaks = self.fingerprints[phonogram_code].get("peaks")
+        if peaks is None or len(peaks) == 0:
+            return np.empty((0, 2), dtype=int)
+
+        mask = (peaks[:, 0] >= offset) & (peaks[:, 0] <= offset + e)
+        return peaks[mask]
+
 
     def _verify_peaks(self, mc, rPeaks, qPeaks, eX=18, eY=12):
         """
@@ -492,9 +427,9 @@ class InMemoryQfpDB:
         xs = [p[0] for p in qPeaks]
         from bisect import bisect_left, bisect_right
         for rPeak in rPeaks:
-            rPeak_adj_x = rPeak.x - mc.offset
+            rPeak_adj_x = rPeak[0] - mc.offset
             rPeakScaled_x = rPeak_adj_x / mc.sFreq
-            rPeakScaled_y = rPeak.y / mc.sTime
+            rPeakScaled_y = rPeak[1] / mc.sTime
             lBound = bisect_left(xs, (rPeakScaled_x - eX))
             rBound = bisect_right(xs, (rPeakScaled_x + eX))
             for i in range(lBound, rBound):
@@ -505,23 +440,23 @@ class InMemoryQfpDB:
         vScore = (float(validated) / len(rPeaks))
         return vScore
 
-    def _validate_match(self, mc, fp):
+    def _validate_match(self, match_candidate, fp_query):
         """
-        mc is MatchCandidate(recordid, offset, num_matches, sTime, sFreq)
+        match_candidate is MatchCandidate(phonogram_code, offset, num_matches, sTime, sFreq)
         """
-        rPeaks = self._lookup_peak_range(mc.recordid, mc.offset)
-        # Ensure qPeaks sorted stored in fp._qPeaks_sorted
-        qPeaks = fp._qPeaks_sorted
-        # create a simple object with fields used by _verify_peaks: mc has recordid, offset, sTime, sFreq
+        rPeaks = self._lookup_peak_range(match_candidate.phonogram_code, match_candidate.offset)
+        # Ensure qPeaks sorted stored in fp_query._query_Peaks_sorted
+        qPeaks = fp_query._query_Peaks_sorted
+        # create a simple object with fields used by _verify_peaks: match_candidate has phonogram_code, offset, sTime, sFreq
         # For compatibility, create a small namedtuple
-        M = namedtuple('M', ['recordid', 'offset', 'sTime', 'sFreq'])
-        mm = M(mc.recordid, mc.offset, mc.sTime, mc.sFreq)
+        M = namedtuple('M', ['phonogram_code', 'offset', 'sTime', 'sFreq'])
+        mm = M(match_candidate.phonogram_code, match_candidate.offset, match_candidate.sTime, match_candidate.sFreq)
         vScore = self._verify_peaks(mm, rPeaks, qPeaks)
         return vScore
 
-    def _lookup_record_title(self, recordid):
+    def _lookup_record_title(self, phonogram_code):
         # reverse lookup in fidindex
         for title, meta in self.fidindex.items():
-            if meta['recordid'] == recordid:
+            if meta['phonogram_code'] == phonogram_code:
                 return title
         return None
