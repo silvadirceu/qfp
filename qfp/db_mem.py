@@ -17,6 +17,40 @@ except ImportError:
     xrange = range
 
 
+def _is_pitch_coherent(qAy: float, cAy, e_tolerance: float) -> bool:
+    """Verifica a coerência de pitch (rough pitch coherence)."""
+    if cAy == 0:
+        return False
+    ratio = qAy / cAy
+    return (1.0 / (1.0 + e_tolerance)) <= ratio <= (1.0 / (1.0 - e_tolerance))
+
+
+def _is_x_transform_valid(qAx: float, qBx: float, cAx, cBx, e_tolerance: float):
+    """Verifica a transformação no eixo X e retorna sTime se válido."""
+    denom = cBx - cAx
+    if denom == 0:
+        return None
+    sTime = (qBx - qAx) / denom
+    if not (1.0 / (1.0 + e_tolerance)) <= sTime <= (1.0 / (1.0 - e_tolerance)):
+        return None
+    return sTime
+
+
+def _is_y_transform_valid(qAy: float, qBy: float, cAy, cBy, e_tolerance: float):
+    """Verifica a transformação no eixo Y e retorna sFreq se válido."""
+    denom = cBy - cAy
+    if denom == 0:
+        return None
+    sFreq = (qBy - qAy) / denom
+    if not (1.0 / (1.0 + e_tolerance)) <= sFreq <= (1.0 / (1.0 - e_tolerance)):
+        return None
+    return sFreq
+
+
+def _is_fine_pitch_coherent(qAy: float, cAy, sFreq: float, threshold: float = 1.8) -> bool:
+    """Verifica a coerência fina de pitch."""
+    return abs(qAy - (cAy * sFreq)) <= threshold
+
 # --------------------------
 # Núcleo numba (sem usar listas Python)
 # --------------------------
@@ -118,6 +152,9 @@ class InMemoryQfpDB:
 
         # list of phonogram_code corresponding to each fingerprint record in the FAISS index
         self.phonogram_code_list = []
+
+        # dict to store the histograms o query filtering process
+        self.histogram_dict = {}
 
         # FAISS index. We keep index_flat for simplicity.
         self.faiss_index = self._create_faiss_index()
@@ -303,37 +340,92 @@ class InMemoryQfpDB:
         faiss_search_end = time.time()
         faiss_index = [I[start:end] for start, end in zip(lims[:-1], lims[1:])]
             
-        candidates_quads_all = []
-        candidates_phonogram_code_all = []
-        for start, end in zip(lims[:-1], lims[1:]):
+        filter_start = time.time()
+        for qi, (start, end) in enumerate(zip(lims[:-1], lims[1:])):
             idx_faiss = I[start:end]
             # 1) Encontrar os intervalos de cada índice
             interval_idx = np.searchsorted(self.border_list, idx_faiss, side='right') - 1
 
             # 2) Pegar o phonogram_code correspondente a cada índice
             # list_phonogram_code_ref = self.phonogram_code_list[interval_idx]
-            list_phonogram_code_ref = [self.phonogram_code_list[i] for i in interval_idx]
+            list_phonogram_code_candidate = [self.phonogram_code_list[i] for i in interval_idx]
 
             # 3) Pegar a posição relativa dentro do intervalo
-            # list_musicid_index_ref = idx_faiss - self.border_list[interval_idx]
-            list_phonogram_code_index_ref = [i - self.border_list[j] for i, j in zip(idx_faiss, interval_idx)]
+            # list_musicid_index_candidate = idx_faiss - self.border_list[interval_idx]
+            list_phonogram_code_index_candidate = [i - self.border_list[j] for i, j in zip(idx_faiss, interval_idx)]
 
-            # list_quads_ref = self.fingerprints[list_phonogram_code_ref]['strongest'][list_phonogram_code_index_ref]
-            list_quads_ref = [
+            # list_quads_candidate = self.fingerprints[list_phonogram_code_candidate]['strongest'][list_phonogram_code_index_candidate]
+            list_quads_candidate = [
                 self.fingerprints[pc]['strongest'][idx]
-                for pc, idx in zip(list_phonogram_code_ref, list_phonogram_code_index_ref)
+                for pc, idx in zip(list_phonogram_code_candidate, list_phonogram_code_index_candidate)
             ]
-        #     candidates_quads_all.append(list_quads_ref)
-        #     candidates_phonogram_code_all.append(list_phonogram_code_ref)
+
+            # query_quads values to use in filter calculations
+            qAx = float(fp_query.strongest[qi, 0])
+            qAy = float(fp_query.strongest[qi, 1])
+            qBx = float(fp_query.strongest[qi, 6])
+            qBy = float(fp_query.strongest[qi, 7])
+            for idx in range(len(list_quads_candidate)): 
+                cAx = list_quads_candidate[idx][0]
+                cAy = list_quads_candidate[idx][1]
+                cBx = list_quads_candidate[idx][6]
+                cBy = list_quads_candidate[idx][7]
+
+                if not _is_pitch_coherent(qAy, cAy, e_tolerance=0.2):
+                    continue
+
+                sTime = _is_x_transform_valid(qAx, qBx, cAx, cBx, e_tolerance=0.2)
+                if sTime is None:
+                    continue
+
+                sFreq = _is_y_transform_valid(qAy, qBy, cAy, cBy, e_tolerance=0.2)
+                if sFreq is None:
+                    continue
+
+                if not _is_fine_pitch_coherent(qAy, cAy, sFreq):
+                    continue
+
+                offset = cAx - (qAx / sTime)
+
+                self.histogram_dict = self._create_histogram(list_phonogram_code_candidate[idx], offset, sTime, sFreq, self.histogram_dict)
+        filter_end = time.time()
+        start_process_histogram = time.time()
+        results = self.process_histogram(self.histogram_dict, min_matches=4)
+        end_process_histogram = time.time()
+
+        # Converter para formato de MatchCandidate
+        start_match_construct = time.time()
+        match_candidates = []
+        for phonogram_code, bins in results.items():
+            for avg_offset, match_count, (sTime, sFreq) in bins:
+                match_candidates.append(
+                    self.MatchCandidate(phonogram_code, avg_offset, match_count, sTime, sFreq)
+                )
+        end_match_construct = time.time()
+
+        # 4. Validação
+        matches_start = time.time()
+        matches = []
+        for candidate in match_candidates:
+            vScore = self._validate_match(candidate, fp_query)
+            if vScore >= vThreshold:
+                # title = self._lookup_record_title(candidate.phonogram_code)
+                matches.append(self.Match(candidate.phonogram_code, candidate.offset, vScore))
+        matches_end = time.time()
+        
+        # fp_query.match_candidates = match_candidate
+        # fp_query.matches = matches
+        # return fp_query.matches
+
 
         # filter_start = time.time()
-        filtered = self._filter_candidates(fp_query.strongest, candidates_quads_all, candidates_phonogram_code_all, e_tolerance=0.2)
+        # filtered = self._filter_candidates(fp_query.strongest, candidates_quads_all, candidates_phonogram_code_all, e_tolerance=0.2)
         # filter_end = time.time()
        
-        # # 3. Bin times + scales
-        bin_start = time.time()
-        binned = {k: self._bin_times(v) for k, v in filtered.items()}
-        bin_end = time.time()
+        # 3. Bin times + scales
+        # bin_start = time.time()
+        # binned = {k: self._bin_times(v) for k, v in filtered.items()}
+        # bin_end = time.time()
         # results_start = time.time()
         # results = {k: self._scales(v) for k, v in binned.items() if len(v) >= 4}
         # results_end = time.time()
@@ -352,14 +444,14 @@ class InMemoryQfpDB:
         #         matches.append(self.Match(candidate.phonogram_code, candidate.offset, vScore))
         # matches_end = time.time()
         # fp_query.match_candidates = match_candidate
-        # fp_query.matches = matches
+        fp_query.matches = matches
 
-        # print(f"FAISS search time: {faiss_search_end - faiss_search_start:.3f}s")
-        # print(f"Filtering time: {filter_end - filter_start:.3f}s")
-        # print(f"Bin times time: {bin_end - bin_start:.3f}s")
-        # print(f"Results time: {results_end - results_start:.3f}s")
-        # print(f"Total matches time: {matches_end - matches_start:.3f}s")
-        # return fp_query.matches
+        print(f"FAISS search time: {faiss_search_end - faiss_search_start:.3f}s")
+        print(f"Filtering time: {filter_end - filter_start:.3f}s")
+        print(f"Histogram process time: {end_process_histogram - start_process_histogram:.3f}s")
+        print(f"Match construct time: {end_match_construct - start_match_construct:.3f}s")
+        print(f"Total matches time: {matches_end - matches_start:.3f}s")
+        return fp_query.matches
 
     # --------------------
     # Helper methods for QFP thecnique
@@ -375,6 +467,99 @@ class InMemoryQfpDB:
         B = self.Peak(int(self.quad_Bx[idx]), int(self.quad_By[idx]))
         phonogram_code = int(self.quad_phonogram_code[idx])
         return self.Quad(A, C, D, B), phonogram_code
+
+    def _create_histogram(self, 
+                          phonogram_code, 
+                          offset, 
+                          sTime, 
+                          sFreq, 
+                          histogram_dict, 
+                          binwidth=20, 
+                          ts=4):
+        bin_idx = int(math.floor(offset / binwidth) * binwidth)
+
+        # Se a música ainda não está no histograma, adiciona
+        if phonogram_code not in histogram_dict:
+            histogram_dict[phonogram_code] = {}
+        
+        # Se o bin ainda não existe para esta música, cria
+        if bin_idx not in histogram_dict[phonogram_code]:
+            histogram_dict[phonogram_code][bin_idx] = {
+                'offsets': [],      # Lista de offsets brutos
+                'transforms': [],   # Lista de transformações (sTime, sFreq)
+                'count': 0          # Contador de matches
+            }
+        
+        # Adiciona o candidato ao bin
+        histogram_dict[phonogram_code][bin_idx]['offsets'].append(offset)
+        histogram_dict[phonogram_code][bin_idx]['transforms'].append((sTime, sFreq))
+        histogram_dict[phonogram_code][bin_idx]['count'] += 1
+        return histogram_dict
+
+
+    def process_histogram(self, histogram_dict, min_matches=4):
+        """
+        Processa o histograma para encontrar matches válidos, aplicando remoção de outliers.
+        Equivalente às funções _scales e _outlier_removal do código original.
+        """
+        results = {}
+        
+        for phonogram_code, bins in histogram_dict.items():
+            valid_bins = []
+            
+            for bin_idx, bin_data in bins.items():
+                # Só processa bins com mínimo de matches (equivalente ao if len(v) >= 4)
+                if bin_data['count'] >= min_matches:
+                    # Pega as transformações deste bin
+                    transforms = bin_data['transforms']  # Lista de (sTime, sFreq)
+                    
+                    # APLICA REMOÇÃO DE OUTLIERS 
+                    cleaned_transforms = self._remove_outliers(transforms)
+                    
+                    # Só considera se após limpeza ainda tiver min_matches
+                    if len(cleaned_transforms) >= min_matches:
+                        # Calcula offset médio (equivalente ao bin_idx * 20 original)
+                        offsets = bin_data['offsets']
+                        avg_offset = np.mean(offsets)  # Ou poderia ser bin_idx * 20
+                        
+                        # Calcula médias das transformações
+                        avg_sTime, avg_sFreq = np.mean(cleaned_transforms, axis=0)
+                        match_count = len(cleaned_transforms)
+                        
+                        valid_bins.append((avg_offset, match_count, (avg_sTime, avg_sFreq)))
+            
+            # Ordena por número de matches (decrescente) - equivalente ao sorted original
+            valid_bins.sort(key=lambda x: x[1], reverse=True)
+            results[phonogram_code] = valid_bins
+        
+        return results
+
+
+    def _remove_outliers(self, transforms):
+        """
+        Versão adaptada da _outlier_removal original para trabalhar com a nova estrutura.
+        Remove pontos que estão além de 2 desvios padrão da média.
+        """
+        if len(transforms) == 0:
+            return []
+        
+        # Converte para array NumPy para cálculos vetorizados
+        transforms_arr = np.array(transforms)
+        
+        # Calcula média e desvio padrão para sTime (coluna 0) e sFreq (coluna 1)
+        means = np.mean(transforms_arr, axis=0)
+        stds = np.std(transforms_arr, axis=0)
+        
+        # Filtra pontos dentro de 2 desvios padrão
+        filtered = []
+        for sTime, sFreq in transforms:
+            if (means[0] - 2 * stds[0] <= sTime <= means[0] + 2 * stds[0] and
+                means[1] - 2 * stds[1] <= sFreq <= means[1] + 2 * stds[1]):
+                filtered.append((sTime, sFreq))
+        
+        return filtered
+
+
 
     def _bin_times(self, l, binwidth=20, ts=4):
         d = defaultdict(list)
