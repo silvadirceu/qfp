@@ -216,9 +216,9 @@ class ReferenceFingerprint(Fingerprint):
         
         fingerprint.fp_type = fingerprint_data['fp_type']
         fingerprint.params = fingerprint_data['params']
-        fingerprint.hashes = fingerprint_data['hashes']
+        fingerprint.hashes = np.array(fingerprint_data['hashes'], dtype=np.float64)
         
-        fingerprint.peaks = np.array([(p.x, p.y) for p in fingerprint_data['peaks']], dtype=np.int64)
+        fingerprint.peaks = np.array([(p[0], p[1]) for p in fingerprint_data['peaks']], dtype=np.int64)
         
         # Restore strongest quads from dict data
         strongest_list = []
