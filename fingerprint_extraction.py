@@ -27,6 +27,21 @@ from pathlib import Path
 
 
 # ---------------QUERY------------------
+# db = InMemoryQfpDB()
+
+# # armazenar vários
+# db.store_from_pickle("/mnt/disk1/BAF/qfp_features/references/ref_0003_fingerprint.pkl")
+# db.store_from_pickle("/mnt/disk1/BAF/qfp_features/references/ref_0004_fingerprint.pkl")
+# query_fp = QueryFingerprint("/mnt/disk1/BAF/audio/references/ref_0003.wav")
+# extraction_start = time.time()
+# query_fp.create()  # gera hashes, peaks, strongest
+# extraction_end = time.time()
+# search_start = time.time()
+# matches = db.query(query_fp, vThreshold=0.2, e_radius=0.07)
+# search_end = time.time()
+# print(f"Tempo de extração: {extraction_end - extraction_start:.4f} segundos")
+# print(f"Tempo de busca: {search_end - search_start:.4f} segundos")
+# print("Matches:", matches)
 
 db = InMemoryQfpDB()
 
@@ -35,37 +50,56 @@ start_index = time.time()
 db.store_all_pickles_from_directory(r"/mnt/disk1/BAF/qfp_features/references")
 end_index = time.time()
 
-query_path = "/mnt/disk1/BAF/audio/queries/query_0001.wav"
-query_fp = QueryFingerprint(query_path)
-filename = os.path.splitext(os.path.basename(query_path))[0]
+# Diretório das queries
+query_dir = "/mnt/disk1/BAF/audio/queries"
 
-extraction_start = time.time()
-query_fp.create()  # gera hashes, peaks, strongest
-extraction_end = time.time()
-search_start = time.time()
-matches = db.query(query_fp, vThreshold=0.05, e_radius=0.09)
-search_end = time.time()
+# Lista de queries desejadas (sem extensão)
+queries = ["query_0002", "query_0004", "query_0185", "query_2225"]
 
+for query_name in queries:
+    query_file = f"{query_name}.wav"
+    query_path = os.path.join(query_dir, query_file)
 
-sorted_matches = sorted(matches, key=lambda m: m.vScore, reverse=True)
+    if not os.path.exists(query_path):
+        print(f"Aviso: {query_file} não encontrado em {query_dir}, pulando...")
+        continue
 
-indexing_time = end_index - start_index
-extraction_time = extraction_end - extraction_start
-# faiss_search_time = search_end - search_start  # se você quiser separar FAISS de "busca total"
-search_time = search_end - search_start
+    # Extração
+    extraction_start = time.time()
+    query_fp = QueryFingerprint(query_path)
+    query_fp.create()
+    extraction_end = time.time()
 
-# montar dicionário final
-output = {
-    "total_matches": len(sorted_matches),
-    "indexing_time": indexing_time,
-    "extraction_time": extraction_time,
-    # "faiss_search_time": faiss_search_time,
-    "search_time": search_time,
-    "matches": [m._asdict() for m in sorted_matches]
-}
-with open(f"{filename}.json", "w", encoding="utf-8") as f:
-    json.dump(output, f, indent=4)
+    # Busca
+    search_start = time.time()
+    matches, faiss_search_time, filter_time, process_histogram_time, matches_time = db.query(query_fp, vThreshold=0.05, e_radius=0.2)
+    search_end = time.time()
 
+    # Ordenar por score
+    sorted_matches = sorted(matches, key=lambda m: m.vScore, reverse=True)
+
+    # Tempos
+    extraction_time = extraction_end - extraction_start
+    search_time = search_end - search_start
+    indexing_time = end_index - start_index
+
+    # Montar dicionário de saída
+    output = {
+        "query_file": query_file,
+        "total_matches": len(sorted_matches),
+        "indexing_time": indexing_time,  # mesmo para todas as queries
+        "extraction_time": extraction_time,
+        "total_search_time": search_time,
+        "faiss_search_time": faiss_search_time,
+        "filter_time": filter_time,
+        "process_histogram_time": process_histogram_time,
+        "matches_time": matches_time,
+        "matches": [m._asdict() for m in sorted_matches]
+    }
+
+    # Salvar JSON individual
+    with open(f"{query_name}.json", "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=4)
 
 
 
