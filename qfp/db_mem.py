@@ -100,7 +100,12 @@ class InMemoryQfpDB:
         Builds a FAISS IndexFlatL2.
         For large DBs prefer IVF,PQ or HNSW depending on memory/speed tradeoffs.
         """
-        return faiss.IndexFlatL2(d)
+        # return faiss.IndexFlatL2(d)
+        index = faiss.IndexHNSWFlat(d, 48)  # 32 = grau do grafo
+        index.hnsw.efSearch = 1024            # controla tradeoff velocidade/precisão
+        index.hnsw.efConstruction = 200     # custo de construção
+        return index
+
     
     # --------------------
     # STORING FUNCTIONS
@@ -170,21 +175,8 @@ class InMemoryQfpDB:
         Returns:
             lims, D, I -> saída bruta do faiss.range_search
         """
-        print("query_hashes type: ", type(query_hashes))
-        print("query_hashes len: ", len(query_hashes), " type: ", type(query_hashes[0]))
-        start_numpy = time.time()
         qmat = np.ascontiguousarray(query_hashes, dtype=np.float32)
-        end_numpy = time.time()
-        print("query_hashes conversion to numpy time: ", end_numpy - start_numpy)
         lims, D, I = self.faiss_index.range_search(qmat, radius * radius)
-        print("Faiss I: ", I)
-        print("Faiss I type: ", type(I))
-        print("Faiss I type: ", type(I[0]))
-        print("Faiss I shape: ", I.shape)
-        print("Faiss lims: ", lims)
-        print("Faiss lims type: ", type(lims))
-        print("Faiss lims type: ", type(lims[0]))
-        print("Faiss lims shape: ", lims.shape)
         return lims, D, I
 
 
@@ -207,19 +199,6 @@ class InMemoryQfpDB:
         faiss_search_end = time.time()
             
         filter_start = time.time()
-        # Diagnóstico dos tipos
-        print(f"Tipo de I: {I.dtype}, formato esperado: int64")
-        print(f"Tipo de lims: {lims.dtype}, formato esperado: uint64") 
-        print(f"Tipo de query_strongest: {fp_query.strongest.dtype}, formato esperado: int64")
-        print(f"Forma de I: {I.shape}")
-        print(f"Forma de lims: {lims.shape}")
-        print(f"Forma de query_strongest: {fp_query.strongest.shape}")
-
-        # Verificar se há problemas de contiguidade
-        print(f"I é C-contíguo: {I.flags['C_CONTIGUOUS']}")
-        print(f"lims é C-contíguo: {lims.flags['C_CONTIGUOUS']}")
-        print(f"query_strongest é C-contíguo: {fp_query.strongest.flags['C_CONTIGUOUS']}")
-
         self.histogram_dict = self._new_filter_candidates(I, lims, fp_query.strongest)
         filter_end = time.time()
         start_process_histogram = time.time()
@@ -240,12 +219,11 @@ class InMemoryQfpDB:
         
         fp_query.matches = matches
 
-        print(f"FAISS search time: {faiss_search_end - faiss_search_start:.3f}s")
-        print(f"Filtering time: {filter_end - filter_start:.3f}s")
-        print(f"Histogram process time: {end_process_histogram - start_process_histogram:.3f}s")
-        # print(f"Match construct time: {end_match_construct - start_match_construct:.3f}s")
-        print(f"Total matches time: {matches_end - matches_start:.3f}s")
-        return fp_query.matches
+        faiss_search_time = faiss_search_end - faiss_search_start
+        filter_time = filter_end - filter_start
+        process_histogram_time = end_process_histogram - start_process_histogram
+        matches_time = matches_end - matches_start
+        return fp_query.matches, faiss_search_time, filter_time, process_histogram_time, matches_time
 
     # --------------------
     # Helper methods for QFP thecnique
@@ -353,31 +331,6 @@ class InMemoryQfpDB:
         
         return filtered
 
-
-
-    # def _bin_times(self, l, binwidth=20, ts=4):
-    #     d = defaultdict(list)
-    #     for offset, (sTime, sFreq) in l:
-    #         binname = int(math.floor(offset / binwidth) * binwidth)
-    #         d[binname].append((sTime, sFreq))
-    #     return {k: v for k, v in d.items() if len(v) >= ts}
-
-    
-    # def _outlier_removal(self, d):
-    #     means = np.mean(d, axis=0)
-    #     stds = np.std(d, axis=0)
-    #     d = [v for v in d if
-    #          (means[0] - 2 * stds[0] <= v[0] <= means[0] + 2 * stds[0]) and
-    #          (means[1] - 2 * stds[1] <= v[1] <= means[1] + 2 * stds[1])]
-    #     return d
-
-    # def _scales(self, d):
-    #     o_rm = {k: self._outlier_removal(v) for k, v in d.items()}
-    #     res = [(i[0], len(i[1]), np.mean(i[1], axis=0))
-    #            for i in o_rm.items() if len(i[1]) >= 4]
-    #     sorted_mc = sorted(res, key=operator.itemgetter(1), reverse=True)
-    #     return sorted_mc
-
     def _lookup_peak_range(self, phonogram_code, offset, e=3750):
         """
         Return peaks for given phonogram_code in range [offset, offset+e]
@@ -453,7 +406,7 @@ class InMemoryQfpDB:
             I_mv,
             lims_mv,
             query_strongest_mv,
-            e_tolerance=0.2
+            e_tolerance=0.75
         )
     
     # def _new_filter_candidates(self, fp_query, I, lims):
