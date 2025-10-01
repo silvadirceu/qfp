@@ -8,4 +8,23 @@
 
 ecad_db
 data
-__pycache__
+qfp_lists
+
+# Cache do Python
+__pycache__/
+*.py[cod]
+
+# Arquivos de build do Cython
+*.c
+*.cpp
+*.so
+
+# Diretórios de build
+build/
+*.egg-info/
+dist/
+
+# Arquivos temporários
+*.pyd
+*.dll
+*.dylib
