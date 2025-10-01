@@ -7,7 +7,7 @@ import operator
 import faiss  # pip install faiss-cpu (ou faiss-gpu)
 import time
 from qfp.fingerprint import fpType, ReferenceFingerprint
-from qfp.cython_test.cython_filter import _new_filter_candidates_cy
+from qfp.cython_functions.cython_filter import _new_filter_candidates_cy
 
 try:
     from itertools import izip
