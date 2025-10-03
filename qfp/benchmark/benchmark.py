@@ -5,6 +5,7 @@ import numpy as np
 import time
 import os
 import glob
+import random
 from collections import defaultdict
 from qfp.db_mem import InMemoryQfpDB
 from qfp import QueryFingerprint
@@ -79,7 +80,8 @@ class QFPBenchmarkIncremental:
             return False
     
     def run_benchmark(self, vThreshold=0.05, e_radius=0.2, queries=None, 
-                     output_file="benchmark_results.json", save_interval=50):
+                     output_file="/home/luiz/repositories/qfp/qfp/benchmark/data/benchmark_results_100_hnsw.json", save_interval=50, 
+                     max_queries=None, random_seed=None):
         """
         Executa o benchmark completo com salvamento incremental
         
@@ -89,7 +91,14 @@ class QFPBenchmarkIncremental:
             queries (list): Lista específica de queries para testar (opcional)
             output_file (str): Arquivo para salvar resultados
             save_interval (int): Salvar a cada N queries
+            max_queries (int): Número máximo de queries a serem processadas (None para todas)
+            random_seed (int): Seed para reproducibilidade dos resultados
         """
+        # Configurar seed para reproducibilidade
+        if random_seed is not None:
+            random.seed(random_seed)
+            print(f"Seed aleatória definida: {random_seed}")
+        
         if queries is None:
             # Usa todas as queries do ground truth
             queries = list(self.ground_truth.keys())
@@ -101,7 +110,13 @@ class QFPBenchmarkIncremental:
             print("Todas as queries já foram processadas!")
             return self._finalize_results()
         
-        print(f"Processando {len(remaining_queries)} queries restantes...")
+        # Aplica limite de queries se especificado
+        if max_queries is not None and max_queries < len(remaining_queries):
+            # Seleção aleatória sem repetição usando random.sample :cite[1]:cite[9]
+            remaining_queries = random.sample(remaining_queries, max_queries)
+            print(f"Selecionadas {max_queries} queries aleatoriamente de {len(queries)} disponíveis")
+        else:
+            print(f"Processando {len(remaining_queries)} queries restantes...")
         
         # Inicializar estrutura de resultados se não existir
         if not self.results:
@@ -111,14 +126,20 @@ class QFPBenchmarkIncremental:
                 'aggregate_metrics': {},
                 'metadata': {
                     'start_time': time.strftime("%Y-%m-%d %H:%M:%S"),
-                    'total_queries': len(queries),
+                    'total_queries': len(remaining_queries),
                     'processed_queries': 0,
+                    'max_queries': max_queries,
+                    'random_seed': random_seed,
                     'parameters': {
                         'vThreshold': vThreshold,
                         'e_radius': e_radius
                     }
                 }
             }
+        else:
+            # Atualizar metadados se já existem resultados
+            self.results['metadata']['max_queries'] = max_queries
+            self.results['metadata']['random_seed'] = random_seed
         
         # Construir banco de dados se não foi feito ainda
         if self.results['build_time'] == 0:
@@ -221,7 +242,7 @@ class QFPBenchmarkIncremental:
         self._calculate_aggregate_metrics(query_metrics)
         
         return self.results
-    
+
     def _save_failed_query(self, query_name, error_message):
         """Registra uma query que falhou"""
         self.results['queries'][query_name] = {
@@ -346,14 +367,27 @@ class QFPBenchmarkIncremental:
         
         print("="*60)
 
-# Função principal para executar o benchmark com continuidade
+# Função principal atualizada
 def main():
-    # Configurações
+    import argparse
+    
+    # Configurações padrão
     GROUND_TRUTH_CSV = "/mnt/disk1/BAF/metadata/cross_annotations.csv"
     REFERENCES_DIR = "/mnt/disk1/BAF/qfp_features/references"
     QUERIES_DIR = "/mnt/disk1/BAF/audio/queries"
     OUTPUT_FILE = "qfp_benchmark_results.json"
     SAVE_INTERVAL = 50  # Salvar a cada 50 queries
+    
+    # Configurar parser de argumentos
+    parser = argparse.ArgumentParser(description='Benchmark do sistema QFP com seleção aleatória de queries')
+    parser.add_argument('--max_queries', type=int, default=None, 
+                       help='Número máximo de queries a serem processadas (padrão: todas)')
+    parser.add_argument('--seed', type=int, default=None,
+                       help='Seed para reproducibilidade da seleção aleatória')
+    parser.add_argument('--output', type=str, default=OUTPUT_FILE,
+                       help='Arquivo de saída para os resultados')
+    
+    args = parser.parse_args()
     
     # Inicializar benchmark
     benchmark = QFPBenchmarkIncremental(
@@ -363,7 +397,7 @@ def main():
     )
     
     # Tentar carregar resultados existentes
-    resume = benchmark.load_existing_results(OUTPUT_FILE)
+    resume = benchmark.load_existing_results(args.output)
     
     if resume:
         progress = benchmark.get_progress()
@@ -383,14 +417,16 @@ def main():
     results = benchmark.run_benchmark(
         vThreshold=0.05,
         e_radius=0.2,
-        output_file=OUTPUT_FILE,
-        save_interval=SAVE_INTERVAL
+        output_file=args.output,
+        save_interval=SAVE_INTERVAL,
+        max_queries=500,
+        random_seed=args.seed
     )
     
     # Gerar relatório final
     benchmark.generate_report()
     
-    print(f"\n✅ Benchmark concluído! Resultados salvos em: {OUTPUT_FILE}")
+    print(f"\n✅ Benchmark concluído! Resultados salvos em: {args.output}")
 
 if __name__ == "__main__":
     main()
