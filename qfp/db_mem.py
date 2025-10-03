@@ -3,7 +3,6 @@ from collections import defaultdict, namedtuple
 import numpy as np
 import os
 import math
-import operator
 import faiss  # pip install faiss-cpu (ou faiss-gpu)
 import time
 from qfp.fingerprint import fpType, ReferenceFingerprint
@@ -14,41 +13,6 @@ try:
 except ImportError:
     izip = zip
     xrange = range
-
-
-def _is_pitch_coherent(qAy: float, cAy, e_tolerance: float) -> bool:
-    """Verifica a coerência de pitch (rough pitch coherence)."""
-    if cAy == 0:
-        return False
-    ratio = qAy / cAy
-    return (1.0 / (1.0 + e_tolerance)) <= ratio <= (1.0 / (1.0 - e_tolerance))
-
-
-def _is_x_transform_valid(qAx: float, qBx: float, cAx, cBx, e_tolerance: float):
-    """Verifica a transformação no eixo X e retorna sTime se válido."""
-    denom = cBx - cAx
-    if denom == 0:
-        return None
-    sTime = (qBx - qAx) / denom
-    if not (1.0 / (1.0 + e_tolerance)) <= sTime <= (1.0 / (1.0 - e_tolerance)):
-        return None
-    return sTime
-
-
-def _is_y_transform_valid(qAy: float, qBy: float, cAy, cBy, e_tolerance: float):
-    """Verifica a transformação no eixo Y e retorna sFreq se válido."""
-    denom = cBy - cAy
-    if denom == 0:
-        return None
-    sFreq = (qBy - qAy) / denom
-    if not (1.0 / (1.0 + e_tolerance)) <= sFreq <= (1.0 / (1.0 - e_tolerance)):
-        return None
-    return sFreq
-
-
-def _is_fine_pitch_coherent(qAy: float, cAy, sFreq: float, threshold: float = 1.8) -> bool:
-    """Verifica a coerência fina de pitch."""
-    return abs(qAy - (cAy * sFreq)) <= threshold
 
 
 class InMemoryQfpDB:
@@ -89,7 +53,7 @@ class InMemoryQfpDB:
         # namedtuples
         mcNames = ['phonogram_code', 'offset', 'num_matches', 'sTime', 'sFreq']
         self.MatchCandidate = namedtuple('MatchCandidate', mcNames)
-        self.Match = namedtuple('Match', ['record', 'offset', 'vScore'])
+        self.Match = namedtuple('Match', ['record', 'offset', 'vScore', 'window_id', 'start_time', 'end_time'])
 
     # --------------------
     # Utilities: internal
@@ -217,17 +181,217 @@ class InMemoryQfpDB:
 
         matches_end = time.time()
         
-        fp_query.matches = matches
-
         faiss_search_time = faiss_search_end - faiss_search_start
         filter_time = filter_end - filter_start
         process_histogram_time = end_process_histogram - start_process_histogram
         matches_time = matches_end - matches_start
-        return fp_query.matches, faiss_search_time, filter_time, process_histogram_time, matches_time
+        return matches, faiss_search_time, filter_time, process_histogram_time, matches_time
+
+    def query_window(self, query_hashes, query_peaks, query_strongest, window_id, start_time, end_time, vThreshold=0.5, e_radius=0.1, radius_l2=None):
+        """
+        Executa busca para uma única janela de query
+        
+        Args:
+            query_hashes: hashes da janela (np.array (N, 4))
+            query_peaks: peaks da janela (np.array (M, 2))
+            query_strongest: quads da janela (np.array (K, 8))
+            vThreshold: threshold de validação
+            e_radius: raio de tolerância
+            radius_l2: raio L2 alternativo
+        
+        Returns:
+            Lista de matches para esta janela
+        """
+        # Preparar query peaks ordenados
+        query_peaks_sorted = query_peaks[query_peaks[:, 0].argsort()]
+        
+        if radius_l2 is None:
+            radius = math.sqrt(4) * e_radius
+        else:
+            radius = float(radius_l2)
+        
+        # 1. FAISS batch search
+        lims, D, I = self._faiss_batch_search(query_hashes, radius)
+        
+        # 2. Filtragem de candidatos
+        histogram_dict = self._new_filter_candidates(I, lims, query_strongest)
+        
+        # 3. Processar histograma
+        results = self._process_histogram(histogram_dict, min_matches=4)
+        
+        # 4. Validação
+        matches = []
+        for phonogram_code, bins in results.items():
+            for avg_offset, match_count, (sTime, sFreq) in bins:
+                mc = self.MatchCandidate(phonogram_code, avg_offset, match_count, sTime, sFreq)
+                vScore = self._validate_match_window(mc, query_peaks_sorted)
+                if vScore >= vThreshold:
+                    matches.append(self.Match(phonogram_code, avg_offset, vScore, window_id, start_time, end_time))
+
+        
+        return matches
+
+    def _validate_match_window(self, match_candidate, query_peaks_sorted):
+        """
+        Versão adaptada do _validate_match para trabalhar com peaks de janela específica
+        """
+        rPeaks = self._lookup_peak_range(match_candidate.phonogram_code, match_candidate.offset)
+        
+        # Usar query_peaks_sorted passado como argumento
+        qPeaks = query_peaks_sorted
+        
+        # Criar objeto compatível
+        M = namedtuple('M', ['phonogram_code', 'offset', 'sTime', 'sFreq'])
+        mm = M(match_candidate.phonogram_code, match_candidate.offset, match_candidate.sTime, match_candidate.sFreq)
+        
+        vScore = self._verify_peaks(mm, rPeaks, qPeaks)
+        return vScore
+
+
+    def query_all_windows(self, fp_query, vThreshold=0.5, e_radius=0.1, radius_l2=None):
+        """
+        Executa busca para todas as janelas de uma QueryFingerprint e consolida resultados
+        
+        Args:
+            fp_query: QueryFingerprint com lista de janelas
+            vThreshold: threshold de validação
+            e_radius: raio de tolerância
+            radius_l2: raio L2 alternativo
+        
+        Returns:
+            matches_consolidados: lista única de matches sem redundâncias
+        """
+        all_matches = []
+        
+        # Validar se é uma QueryFingerprint com janelas
+        if not hasattr(fp_query, 'windows') or not fp_query.windows:
+            raise TypeError("QueryFingerprint deve ter janelas processadas. Chame create() primeiro.")
+        
+        print(f"Processando {len(fp_query.windows)} janelas de query...")
+        
+        # Processar cada janela
+        for i, window in enumerate(fp_query.windows):
+            print(f"Buscando na janela {i+1}: {window['start_time']:.1f}s - {window['end_time']:.1f}s")
+            
+            matches_janela = self.query_window(
+                query_hashes=window['hashes'],
+                query_peaks=window['peaks'],
+                query_strongest=window['strongest'],
+                vThreshold=vThreshold,
+                e_radius=e_radius,
+                radius_l2=radius_l2,
+                window_id=i,
+                start_time=window['start_time'],
+                end_time=window['end_time']
+            )
+            
+            all_matches.extend(matches_janela)
+        
+        # Consolidar matches removendo redundâncias
+        start_consolide = time.time()
+        matches_consolidados = self._consolidar_matches(all_matches)
+        end_consolide = time.time()
+        print("consolide time: ", end_consolide - start_consolide)
+        
+        print(f"Encontrados {len(all_matches)} matches brutos, {len(matches_consolidados)} após consolidação")
+
+        return matches_consolidados
+
+
 
     # --------------------
     # Helper methods for QFP thecnique
     # --------------------
+    def _consolidar_matches(self, all_matches, offset_tolerance=10.0, time_tolerance=2.0, score_threshold=0.6):
+        """
+        Consolida matches considerando tanto offset de referência quanto tempo da query
+        
+        Args:
+            all_matches: lista de todos os matches de todas as janelas
+            offset_tolerance: tolerância para offsets similares (em segundos)
+            time_tolerance: tolerância para tempos de query similares (em segundos) 
+            score_threshold: score mínimo para considerar match válido
+        
+        Returns:
+            Lista consolidada de matches únicos
+        """
+        if not all_matches:
+            return []
+        
+        # Converter tolerância de offset para frames (assumindo taxa de 8kHz, hop=32)
+        hop_size = 32
+        sample_rate = 8000
+        seconds_per_frame = hop_size / sample_rate
+        tolerance_in_frames = offset_tolerance / seconds_per_frame
+        
+        # Agrupar por phonogram_code primeiro
+        matches_por_audio = {}
+        for match in all_matches:
+            if match.record not in matches_por_audio:
+                matches_por_audio[match.record] = []
+            matches_por_audio[match.record].append(match)
+        
+        matches_consolidados = []
+        
+        for phonogram_code, matches in matches_por_audio.items():
+            # Para cada áudio, agrupar matches por proximidade temporal
+            grupos_temporais = self._agrupar_por_proximidade_temporal(
+                matches, tolerance_in_frames, time_tolerance
+            )
+            
+            # Para cada grupo temporal, selecionar o melhor match
+            for grupo in grupos_temporais:
+                if len(grupo) == 1:
+                    best_match = grupo[0]
+                else:
+                    # Selecionar match com maior vScore
+                    best_match = max(grupo, key=lambda x: x.vScore)
+                    
+                    # Se houver múltiplos matches bons, refinar offset
+                    if len(grupo) >= 2 and best_match.vScore > score_threshold:
+                        # Calcular offset médio ponderado pelo score
+                        total_score = sum(m.vScore for m in grupo)
+                        offset_medio = sum(m.offset * m.vScore for m in grupo) / total_score
+                        best_match = best_match._replace(offset=offset_medio)
+                
+                matches_consolidados.append(best_match)
+        
+        # Ordenar por score decrescente
+        matches_consolidados.sort(key=lambda x: x.vScore, reverse=True)
+        return matches_consolidados
+
+    def _agrupar_por_proximidade_temporal(self, matches, offset_tolerance_frames, time_tolerance_seconds):
+        """
+        Agrupa matches por proximidade tanto no offset de referência quanto no tempo da query
+        """
+        if not matches:
+            return []
+        
+        # Ordenar por uma combinação de offset e tempo de query
+        matches_ordenados = sorted(matches, key=lambda x: (x.offset, x.start_time))
+        
+        grupos = []
+        current_group = [matches_ordenados[0]]
+        
+        for i in range(1, len(matches_ordenados)):
+            current_match = matches_ordenados[i]
+            last_match = current_group[-1]
+            
+            # Calcular similaridades
+            offset_similar = abs(current_match.offset - last_match.offset) <= offset_tolerance_frames
+            time_similar = abs(current_match.start_time - last_match.start_time) <= time_tolerance_seconds
+            
+            # Verificar se são suficientemente similares para agrupar
+            if offset_similar and time_similar:
+                current_group.append(current_match)
+            else:
+                grupos.append(current_group)
+                current_group = [current_match]
+        
+        if current_group:
+            grupos.append(current_group)
+        
+        return grupos
 
     def _lookup_quad_by_index(self, idx):
         """
