@@ -108,13 +108,51 @@ class FAISSBenchmark:
         print(f"Carregadas {loaded_count} queries")
         return queries
     
-    def run_benchmark_for_radius(self, e_radius, queries, output_dir="faiss_benchmark_results"):
+    def _save_partial_results(self, results, output_dir, e_radius, checkpoint_info=None):
+        """Salva resultados parciais com informações do checkpoint"""
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # Nome do arquivo inclui o raio e indica que é parcial
+        filename = f"faiss_benchmark_radius_{e_radius}_partial.json".replace('.', '_')
+        output_path = os.path.join(output_dir, filename)
+        
+        # Adicionar informações do checkpoint
+        if checkpoint_info:
+            results['checkpoint'] = checkpoint_info
+        
+        results['metadata']['last_update'] = time.strftime("%Y-%m-%d %H:%M:%S")
+        results['metadata']['status'] = 'partial'
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+        
+        print(f"💾 Checkpoint salvo: {len(results['queries'])} queries processadas")
+    
+    def _load_partial_results(self, output_dir, e_radius):
+        """Carrega resultados parciais se existirem"""
+        filename = f"faiss_benchmark_radius_{e_radius}_partial.json".replace('.', '_')
+        output_path = os.path.join(output_dir, filename)
+        
+        if os.path.exists(output_path):
+            try:
+                with open(output_path, 'r', encoding='utf-8') as f:
+                    results = json.load(f)
+                print(f"🔄 Continuando de checkpoint: {len(results['queries'])} queries já processadas")
+                return results
+            except Exception as e:
+                print(f"⚠️  Erro ao carregar checkpoint: {e}")
+        
+        return None
+    
+    def run_benchmark_for_radius(self, e_radius, queries, load_time, output_dir="faiss_benchmark_results"):
         """
-        Executa benchmark para um raio específico
+        Executa benchmark para um raio específico com salvamento incremental
         
         Args:
             e_radius (float): Raio para busca FAISS
             queries (dict): Dicionário de QueryFingerprints
+            load_time (float): Tempo de carga do banco de referência
             output_dir (str): Diretório para salvar resultados
         
         Returns:
@@ -125,32 +163,66 @@ class FAISSBenchmark:
         print(f"EXECUTANDO BENCHMARK PARA e_radius = {e_radius}")
         print(f"{'='*60}")
         
-        results = {
-            'e_radius': e_radius,
-            'load_time': 0,
-            'queries': {},
-            'aggregate_metrics': {},
-            'metadata': {
-                'start_time': time.strftime("%Y-%m-%d %H:%M:%S"),
-                'total_queries': len(queries),
-                'parameters': {
-                    'e_radius': e_radius
+        # Tentar carregar resultados parciais
+        partial_results = self._load_partial_results(output_dir, e_radius)
+        
+        if partial_results:
+            results = partial_results
+            # Filtrar queries que já foram processadas
+            processed_queries = set(results['queries'].keys())
+            remaining_queries = {k: v for k, v in queries.items() if k not in processed_queries}
+            print(f"🔄 {len(processed_queries)} queries já processadas, {len(remaining_queries)} restantes")
+        else:
+            # Inicializar nova execução
+            results = {
+                'e_radius': e_radius,
+                'load_time': load_time,
+                'queries': {},
+                'aggregate_metrics': {},
+                'metadata': {
+                    'start_time': time.strftime("%Y-%m-%d %H:%M:%S"),
+                    'total_queries': len(queries),
+                    'parameters': {
+                        'e_radius': e_radius
+                    }
                 }
             }
-        }
+            remaining_queries = queries
         
-        # Construir banco de dados (uma vez só)
-        if results['load_time'] == 0:
-            load_time = self.build_reference_database()
-            results['load_time'] = load_time
+        # Se não há queries restantes, recalcular métricas e salvar resultado final
+        if not remaining_queries:
+            print("✅ Todas as queries já foram processadas, recalculando métricas...")
+            self._recalculate_aggregate_metrics(results)
+            self._save_final_results(results, output_dir, e_radius)
+            return results
         
         query_metrics = []
-        total_search_time_all_queries = 0
-        total_faiss_time = 0
-        total_sum_time = 0
+        total_search_time_all_queries = results.get('aggregate_metrics', {}).get('total_search_time_all_queries', 0)
+        total_faiss_time = results.get('aggregate_metrics', {}).get('total_faiss_time', 0)
+        total_sum_time = results.get('aggregate_metrics', {}).get('total_sum_time', 0)
         
-        for i, (query_name, query_fp) in enumerate(queries.items()):
-            print(f"[{i+1}/{len(queries)}] Processando query: {query_name}")
+        # Reconstruir query_metrics a partir dos resultados existentes
+        for query_name, query_result in results['queries'].items():
+            query_metrics.append({
+                'query': query_name,
+                'precision': query_result['precision'],
+                'recall': query_result['recall'],
+                'f1_score': query_result['f1_score'],
+                'search_time': query_result['total_search_time'],
+                'faiss_time': query_result['faiss_time'],
+                'sum_time': query_result['sum_time'],
+                'true_positives_count': query_result['true_positives_count'],
+                'false_positives_count': query_result['false_positives_count'],
+                'total_candidates': query_result['total_candidates']
+            })
+        
+        # Processar queries restantes
+        checkpoint_interval = 5
+        processed_in_this_run = 0
+        
+        for i, (query_name, query_fp) in enumerate(remaining_queries.items()):
+            global_index = len(results['queries']) + 1
+            print(f"[{global_index}/{len(queries)}] Processando query: {query_name}")
             
             # Busca no banco de dados
             search_start = time.time()
@@ -160,7 +232,7 @@ class FAISSBenchmark:
                 )
                 search_time = time.time() - search_start
             except Exception as e:
-                print(f"Erro na busca de {query_name}: {e}")
+                print(f"❌ Erro na busca de {query_name}: {e}")
                 continue
             
             total_search_time_all_queries += search_time
@@ -216,15 +288,90 @@ class FAISSBenchmark:
             print(f"  ✅ Recall: {recall:.3f}, Precision: {precision:.3f}, F1: {f1:.3f}")
             print(f"  📊 TP: {len(true_positives)}, FP: {len(false_positives)}, FN: {len(false_negatives)}")
             print(f"  ⏱️  Tempo busca: {search_time:.2f}s, FAISS: {faiss_time:.2f}s, Soma: {sum_time:.2f}s")
+            
+            processed_in_this_run += 1
+            
+            # Salvar checkpoint a cada 50 queries ou no final
+            if processed_in_this_run % checkpoint_interval == 0 or (i == len(remaining_queries) - 1):
+                checkpoint_info = {
+                    'processed_queries': len(results['queries']),
+                    'total_queries': len(queries),
+                    'progress': f"{len(results['queries'])}/{len(queries)}",
+                    'checkpoint_time': time.strftime("%Y-%m-%d %H:%M:%S")
+                }
+                
+                # Recalcular métricas parciais para o checkpoint
+                self._calculate_aggregate_metrics(results, query_metrics, total_search_time_all_queries, 
+                                                total_faiss_time, total_sum_time)
+                
+                self._save_partial_results(results, output_dir, e_radius, checkpoint_info)
         
-        # Calcular métricas agregadas
+        # Processamento completo - salvar resultado final
         self._calculate_aggregate_metrics(results, query_metrics, total_search_time_all_queries, 
                                         total_faiss_time, total_sum_time)
+        self._save_final_results(results, output_dir, e_radius)
         
-        # Salvar resultados
-        self._save_results(results, output_dir, e_radius)
+        # Remover arquivo parcial se existir
+        partial_filename = f"faiss_benchmark_radius_{e_radius}_partial.json".replace('.', '_')
+        partial_path = os.path.join(output_dir, partial_filename)
+        if os.path.exists(partial_path):
+            os.remove(partial_path)
+            print(f"🧹 Arquivo parcial removido: {partial_path}")
         
         return results
+    
+    def _recalculate_aggregate_metrics(self, results):
+        """Recalcula métricas agregadas a partir dos resultados existentes"""
+        query_metrics = []
+        total_search_time_all_queries = 0
+        total_faiss_time = 0
+        total_sum_time = 0
+        
+        for query_name, query_result in results['queries'].items():
+            query_metrics.append({
+                'query': query_name,
+                'precision': query_result['precision'],
+                'recall': query_result['recall'],
+                'f1_score': query_result['f1_score'],
+                'search_time': query_result['total_search_time'],
+                'faiss_time': query_result['faiss_time'],
+                'sum_time': query_result['sum_time'],
+                'true_positives_count': query_result['true_positives_count'],
+                'false_positives_count': query_result['false_positives_count'],
+                'total_candidates': query_result['total_candidates']
+            })
+            
+            total_search_time_all_queries += query_result['total_search_time']
+            total_faiss_time += query_result['faiss_time']
+            total_sum_time += query_result['sum_time']
+        
+        self._calculate_aggregate_metrics(results, query_metrics, total_search_time_all_queries, 
+                                        total_faiss_time, total_sum_time)
+    
+    def _save_final_results(self, results, output_dir, e_radius):
+        """Salva resultados finais em arquivo JSON"""
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # Nome do arquivo final
+        filename = f"faiss_benchmark_radius_{e_radius}.json".replace('.', '_')
+        output_path = os.path.join(output_dir, filename)
+        
+        results['metadata']['end_time'] = time.strftime("%Y-%m-%d %H:%M:%S")
+        results['metadata']['status'] = 'completed'
+        
+        # Remover checkpoint info se existir
+        if 'checkpoint' in results:
+            del results['checkpoint']
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+        
+        print(f"✅ Resultados finais salvos em: {output_path}")
+        print(f"📊 Total de queries processadas: {len(results['queries'])}")
+        
+        # Também exportar para CSV
+        # self._export_to_csv(results, output_dir, e_radius)
     
     def _calculate_aggregate_metrics(self, results, query_metrics, total_search_time, 
                                    total_faiss_time, total_sum_time):
@@ -336,26 +483,6 @@ class FAISSBenchmark:
         
         results['aggregate_metrics'] = aggregate
     
-    def _save_results(self, results, output_dir, e_radius):
-        """Salva resultados em arquivo JSON"""
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-        
-        # Nome do arquivo inclui o raio
-        filename = f"faiss_benchmark_radius_{e_radius}.json".replace('.', '_')
-        output_path = os.path.join(output_dir, filename)
-        
-        results['metadata']['end_time'] = time.strftime("%Y-%m-%d %H:%M:%S")
-        results['metadata']['status'] = 'completed'
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        
-        print(f"✅ Resultados salvos em: {output_path}")
-        
-        # Também exportar para CSV
-        self._export_to_csv(results, output_dir, e_radius)
-    
     def _export_to_csv(self, results, output_dir, e_radius):
         """Exporta resultados agregados para CSV"""
         agg = results.get('aggregate_metrics', {})
@@ -400,11 +527,11 @@ class FAISSBenchmark:
             ]
         }
 
-        # df = pd.DataFrame(data)
-        # csv_filename = f"faiss_benchmark_radius_{e_radius:.2f}.csv".replace('.', '_')
-        # csv_path = os.path.join(output_dir, csv_filename)
-        # # df.to_csv(csv_path, index=False)
-        # print(f"📈 CSV exportado para: {csv_path}")
+        df = pd.DataFrame(data)
+        csv_filename = f"faiss_benchmark_radius_{e_radius:.2f}.csv".replace('.', '_')
+        csv_path = os.path.join(output_dir, csv_filename)
+        df.to_csv(csv_path, index=False)
+        print(f"📈 CSV exportado para: {csv_path}")
     
     def generate_summary_report(self, all_results, output_dir):
         """Gera um relatório resumido comparando todos os raios testados"""
@@ -451,7 +578,7 @@ def main():
     
     # Configurar parser de argumentos
     parser = argparse.ArgumentParser(description='Benchmark simplificado do FAISS com múltiplos raios')
-    parser.add_argument('--max_queries', type=int, default=5,
+    parser.add_argument('--max_queries', type=int, default=15,
                        help='Número máximo de queries a serem processadas (padrão: 100)')
     parser.add_argument('--seed', type=int, default=42,
                        help='Seed para reproducibilidade')
@@ -482,14 +609,18 @@ def main():
         print("❌ Nenhuma query válida encontrada!")
         return
     
+    # CONSTRUIR BANCO UMA ÚNICA VEZ ANTES DO LOOP
+    print("Construindo banco de dados de referência (uma única vez)...")
+    load_time = benchmark.build_reference_database()
+    
     # Executar benchmark para cada raio
     all_results = {}
     radii = np.arange(args.start_radius, args.end_radius + args.step_radius, args.step_radius)
     print("RADII: ", radii)
     
     for e_radius in radii:
-        # e_radius = round(e_radius, 2)  # Arredondar para 2 casas decimais
-        results = benchmark.run_benchmark_for_radius(e_radius, queries, OUTPUT_DIR)
+        # Passar load_time como parâmetro
+        results = benchmark.run_benchmark_for_radius(e_radius, queries, load_time, OUTPUT_DIR)
         all_results[e_radius] = results
     
     # Gerar relatório sumário
