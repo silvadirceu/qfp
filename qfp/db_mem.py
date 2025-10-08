@@ -6,7 +6,9 @@ import math
 import faiss  # pip install faiss-cpu (ou faiss-gpu)
 import time
 from qfp.fingerprint import fpType, ReferenceFingerprint
-from qfp.cython_functions.cython_filter import _new_filter_candidates_cy
+from qfp.cython_functions.filters.cython_filter import _new_filter_candidates_cy
+from qfp.cython_functions.query_lims.query_lims import _process_faiss_results_cy
+import json
 
 try:
     from itertools import izip
@@ -65,8 +67,8 @@ class InMemoryQfpDB:
         For large DBs prefer IVF,PQ or HNSW depending on memory/speed tradeoffs.
         """
         # return faiss.IndexFlatL2(d)
-        index = faiss.IndexHNSWFlat(d, 48)  # 32 = grau do grafo
-        index.hnsw.efSearch = 1024            # controla tradeoff velocidade/precisão
+        index = faiss.IndexHNSWFlat(d, 32)  # 32 = grau do grafo
+        index.hnsw.efSearch = 512            # controla tradeoff velocidade/precisão
         index.hnsw.efConstruction = 200     # custo de construção
         return index
 
@@ -140,8 +142,12 @@ class InMemoryQfpDB:
             lims, D, I -> saída bruta do faiss.range_search
         """
         qmat = np.ascontiguousarray(query_hashes, dtype=np.float32)
+        start_faiss = time.time()
         lims, D, I = self.faiss_index.range_search(qmat, radius * radius)
-        return lims, D, I
+        end_faiss = time.time()
+        # print("Faiss search time: ", end_faiss-start_faiss)
+        faiss_time = end_faiss - start_faiss
+        return lims, D, I, faiss_time
 
 
     def query(self, fp_query, vThreshold=0.5, e_radius=0.1, radius_l2=None):
@@ -159,7 +165,7 @@ class InMemoryQfpDB:
 
         # 1. FAISS batch search
         faiss_search_start = time.time()
-        lims, D, I = self._faiss_batch_search(fp_query.hashes, radius)
+        lims, D, I, faiss_time = self._faiss_batch_search(fp_query.hashes, radius)
         faiss_search_end = time.time()
             
         filter_start = time.time()
@@ -203,7 +209,7 @@ class InMemoryQfpDB:
             Lista de matches para esta janela
         """
         # Preparar query peaks ordenados
-        query_peaks_sorted = query_peaks[query_peaks[:, 0].argsort()]
+        # query_peaks_sorted = query_peaks[query_peaks[:, 0].argsort()]
         
         if radius_l2 is None:
             radius = math.sqrt(4) * e_radius
@@ -211,25 +217,51 @@ class InMemoryQfpDB:
             radius = float(radius_l2)
         
         # 1. FAISS batch search
-        lims, D, I = self._faiss_batch_search(query_hashes, radius)
+        lims, D, I, faiss_time = self._faiss_batch_search(query_hashes, radius)
+        start_sum = time.time()
+        # for qi, (start, end) in enumerate(zip(lims[:-1], lims[1:])):
+        #     idx_faiss = I[start:end]
+        #     # 1) Encontrar os intervalos de cada índice
+        #     interval_idx = np.searchsorted(self.border_list, idx_faiss, side='right') - 1
+
+        #     # 2) Pegar o phonogram_code correspondente a cada índice
+        #     list_phonogram_code_candidate = [self.phonogram_code_list[i] for i in interval_idx]
+        list_phonogram_code_candidate = _process_faiss_results_cy(
+            self.border_list,
+            self.phonogram_code_list,
+            np.asarray(I, dtype=np.int64),
+            np.asarray(lims, dtype=np.uint64),
+        )
+
+        end_sum = time.time()
+        sum_time = end_sum - start_sum
+            # # 3) Pegar a posição relativa dentro do intervalo
+            # # list_musicid_index_candidate = idx_faiss - self.border_list[interval_idx]
+            # list_phonogram_code_index_candidate = [i - self.border_list[j] for i, j in zip(idx_faiss, interval_idx)]
+
+            # # list_quads_candidate = self.fingerprints[list_phonogram_code_candidate]['strongest'][list_phonogram_code_index_candidate]
+            # list_quads_candidate = [
+            #     self.fingerprints[pc]['strongest'][idx]
+            #     for pc, idx in zip(list_phonogram_code_candidate, list_phonogram_code_index_candidate)
+            # ]
+        
         
         # 2. Filtragem de candidatos
-        histogram_dict = self._new_filter_candidates(I, lims, query_strongest)
+        # histogram_dict = self._new_filter_candidates(I, lims, query_strongest)
+        # # 3. Processar histograma
+        # results = self._process_histogram(histogram_dict, min_matches=4)
         
-        # 3. Processar histograma
-        results = self._process_histogram(histogram_dict, min_matches=4)
-        
-        # 4. Validação
-        matches = []
-        for phonogram_code, bins in results.items():
-            for avg_offset, match_count, (sTime, sFreq) in bins:
-                mc = self.MatchCandidate(phonogram_code, avg_offset, match_count, sTime, sFreq)
-                vScore = self._validate_match_window(mc, query_peaks_sorted)
-                if vScore >= vThreshold:
-                    matches.append(self.Match(phonogram_code, avg_offset, vScore, window_id, start_time, end_time))
+        # # 4. Validação
+        # matches = []
+        # for phonogram_code, bins in results.items():
+        #     for avg_offset, match_count, (sTime, sFreq) in bins:
+        #         mc = self.MatchCandidate(phonogram_code, avg_offset, match_count, sTime, sFreq)
+        #         vScore = self._validate_match_window(mc, query_peaks_sorted)
+        #         if vScore >= vThreshold:
+        #             matches.append(self.Match(phonogram_code, avg_offset, vScore, window_id, start_time, end_time))
 
         
-        return matches
+        return list_phonogram_code_candidate, faiss_time, sum_time
 
     def _validate_match_window(self, match_candidate, query_peaks_sorted):
         """
@@ -267,13 +299,14 @@ class InMemoryQfpDB:
         if not hasattr(fp_query, 'windows') or not fp_query.windows:
             raise TypeError("QueryFingerprint deve ter janelas processadas. Chame create() primeiro.")
         
-        print(f"Processando {len(fp_query.windows)} janelas de query...")
-        
+        # print(f"Processando {len(fp_query.windows)} janelas de query...")
+        faiss_time_count = 0
+        sum_time_count = 0
         # Processar cada janela
         for i, window in enumerate(fp_query.windows):
-            print(f"Buscando na janela {i+1}: {window['start_time']:.1f}s - {window['end_time']:.1f}s")
+            # print(f"Buscando na janela {i+1}: {window['start_time']:.1f}s - {window['end_time']:.1f}s")
             
-            matches_janela = self.query_window(
+            matches_janela, faiss_time, sum_time = self.query_window(
                 query_hashes=window['hashes'],
                 query_peaks=window['peaks'],
                 query_strongest=window['strongest'],
@@ -284,18 +317,19 @@ class InMemoryQfpDB:
                 start_time=window['start_time'],
                 end_time=window['end_time']
             )
-            
+            faiss_time_count += faiss_time
+            sum_time_count += sum_time
             all_matches.extend(matches_janela)
         
         # Consolidar matches removendo redundâncias
-        start_consolide = time.time()
-        matches_consolidados = self._consolidar_matches(all_matches)
-        end_consolide = time.time()
-        print("consolide time: ", end_consolide - start_consolide)
+        # start_consolide = time.time()
+        # matches_consolidados = self._consolidar_matches(all_matches)
+        # end_consolide = time.time()
+        # print("consolide time: ", end_consolide - start_consolide)
         
-        print(f"Encontrados {len(all_matches)} matches brutos, {len(matches_consolidados)} após consolidação")
-
-        return matches_consolidados
+        # with open("teste.json", "w", encoding="utf-8") as arquivo:
+        #     json.dump(all_matches, arquivo, ensure_ascii=False, indent=4)
+        return all_matches, faiss_time_count, sum_time_count
 
 
 
@@ -570,7 +604,7 @@ class InMemoryQfpDB:
             I_mv,
             lims_mv,
             query_strongest_mv,
-            e_tolerance=0.75
+            e_tolerance=0.2
         )
     
     # def _new_filter_candidates(self, fp_query, I, lims):
